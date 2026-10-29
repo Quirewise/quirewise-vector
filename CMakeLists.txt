@@ -5,6 +5,9 @@ include(CMakePackageConfigHelpers)
 if(NOT TARGET Quirewise::Data)
     find_package(QuirewiseData CONFIG REQUIRED)
 endif()
+if(NOT TARGET Quirewise::Compression)
+    find_package(QuirewiseCompression CONFIG REQUIRED)
+endif()
 file(GLOB_RECURSE QW_SOURCES CONFIGURE_DEPENDS src/*.c src/*.cpp)
 add_library(quirewise_vector STATIC ${QW_SOURCES})
 add_library(Quirewise::Vector ALIAS quirewise_vector)
@@ -14,7 +17,9 @@ target_include_directories(quirewise_vector PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/core ${CMAKE_CURRENT_SOURCE_DIR}/src/formats ${CMAKE_CURRENT_SOURCE_DIR}/src/backends)
-target_link_libraries(quirewise_vector PRIVATE Quirewise::Data)
+target_link_libraries(quirewise_vector PRIVATE
+    Quirewise::Data Quirewise::Compression
+    "$<$<NOT:$<PLATFORM_ID:Windows>>:m>")
 install(TARGETS quirewise_vector EXPORT QuirewiseVectorTargets
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"

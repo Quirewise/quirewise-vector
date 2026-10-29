@@ -5,11 +5,12 @@
 
 #include "quirewise/status.h"
 
+#include <quirewise/compression.h>
+
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
 #include <stdio.h>
-#include <zlib.h>
 
 static int svgz_error(QwConvertReport *report, const char *message, int status)
 {
@@ -21,14 +22,10 @@ int qw_svgz_decompress_internal(const void *data, size_t size,
                                 uint8_t **out_svg, size_t *out_svg_size,
                                 QwConvertReport *report)
 {
-    z_stream stream;
-    uint8_t *output = NULL;
-    size_t capacity = 0u;
+    const uint8_t *input = (const uint8_t *)data;
+    uint8_t *output;
     size_t output_size = 0u;
     const size_t output_limit = QW_SVG_MAX_INPUT_BYTES;
-    int initialized = 0;
-    int zrc;
-    int rc = QW_STATUS_ERR_DECODE;
 
     if (out_svg) *out_svg = NULL;
     if (out_svg_size) *out_svg_size = 0u;
@@ -40,87 +37,35 @@ int qw_svgz_decompress_internal(const void *data, size_t size,
         return svgz_error(report, "SVGZ input exceeds the byte limit",
                           QW_STATUS_ERR_RESOURCE_LIMIT);
     }
-    if (size < 2u || ((const uint8_t *)data)[0] != 0x1fu ||
-        ((const uint8_t *)data)[1] != 0x8bu) {
+    if (size < 18u || input[0] != 0x1fu || input[1] != 0x8bu) {
         return svgz_error(report, "SVGZ input has no gzip header", QW_STATUS_ERR_FORMAT);
     }
-
-    memset(&stream, 0, sizeof(stream));
-    zrc = inflateInit2(&stream, MAX_WBITS + 16);
-    if (zrc != Z_OK) {
-        return svgz_error(report, "Could not initialize SVGZ decompressor",
-                          zrc == Z_MEM_ERROR ? QW_STATUS_ERR_OUT_OF_MEMORY
-                                             : QW_STATUS_ERR_DECODE);
+    output_size = (size_t)input[size - 4u] |
+                  ((size_t)input[size - 3u] << 8) |
+                  ((size_t)input[size - 2u] << 16) |
+                  ((size_t)input[size - 1u] << 24);
+    if (output_size > output_limit) {
+        return svgz_error(report, "SVGZ decompressed data exceeds 32 MiB",
+                          QW_STATUS_ERR_RESOURCE_LIMIT);
     }
-    initialized = 1;
-    stream.next_in = (Bytef *)(void *)data;
-    stream.avail_in = (uInt)size;
-
-    for (;;) {
-        uInt input_before;
-        uInt output_before;
-        size_t capacity_limit = output_limit + 1u;
-        if (capacity == output_size) {
-            size_t next_capacity = capacity
-                ? (capacity > capacity_limit / 2u
-                    ? capacity_limit : capacity * 2u)
-                : 64u * 1024u;
-            uint8_t *grown;
-            if (next_capacity > capacity_limit) next_capacity = capacity_limit;
-            grown = (uint8_t *)realloc(output, next_capacity);
-            if (!grown) {
-                rc = svgz_error(report, "Could not allocate SVGZ output buffer",
-                                QW_STATUS_ERR_OUT_OF_MEMORY);
-                break;
-            }
-            output = grown;
-            capacity = next_capacity;
-        }
-        input_before = stream.avail_in;
-        stream.next_out = output + output_size;
-        stream.avail_out = (uInt)(capacity - output_size);
-        output_before = stream.avail_out;
-        zrc = inflate(&stream, Z_NO_FLUSH);
-        output_size += (size_t)(output_before - stream.avail_out);
-        if (output_size > output_limit) {
-            rc = svgz_error(report, "SVGZ decompressed data exceeds 32 MiB",
-                            QW_STATUS_ERR_RESOURCE_LIMIT);
-            break;
-        }
-        if (zrc == Z_STREAM_END) {
-            if (stream.avail_in != 0u) {
-                rc = svgz_error(report,
-                    "SVGZ contains trailing data or multiple gzip members",
-                    QW_STATUS_ERR_FORMAT);
-                break;
-            }
-            if (!output_size) {
-                rc = svgz_error(report, "SVGZ contains no SVG document",
-                                QW_STATUS_ERR_FORMAT);
-                break;
-            }
-            *out_svg = output;
-            *out_svg_size = output_size;
-            output = NULL;
-            rc = QW_STATUS_OK;
-            break;
-        }
-        if (zrc != Z_OK) {
-            rc = svgz_error(report, "SVGZ decompression failed",
-                            zrc == Z_MEM_ERROR ? QW_STATUS_ERR_OUT_OF_MEMORY
-                                               : QW_STATUS_ERR_DECODE);
-            break;
-        }
-        if (input_before == stream.avail_in && output_before == stream.avail_out) {
-            rc = svgz_error(report, "SVGZ decompressor made no progress",
-                            QW_STATUS_ERR_DECODE);
-            break;
-        }
+    output = (uint8_t *)malloc(output_size ? output_size : 1u);
+    if (!output) {
+        return svgz_error(report, "Could not allocate SVGZ output buffer",
+                          QW_STATUS_ERR_OUT_OF_MEMORY);
     }
-
-    if (initialized) (void)inflateEnd(&stream);
-    free(output);
-    return rc;
+    if (!qw_compression_inflate_gzip(input, size, output, output_size)) {
+        free(output);
+        return svgz_error(report, "SVGZ decompression failed",
+                          QW_STATUS_ERR_DECODE);
+    }
+    if (!output_size) {
+        free(output);
+        return svgz_error(report, "SVGZ contains no SVG document",
+                          QW_STATUS_ERR_FORMAT);
+    }
+    *out_svg = output;
+    *out_svg_size = output_size;
+    return QW_STATUS_OK;
 }
 
 static QwSvgzStatus svgz_status_from_parser(int status)

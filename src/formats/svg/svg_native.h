@@ -1,7 +1,7 @@
 #ifndef QUIREWISE_SVG_NATIVE_H
 #define QUIREWISE_SVG_NATIVE_H
 
-#include "quirewise/convert.h"
+#include "quirewise/format.h"
 
 #include <stddef.h>
 #include <stdint.h>

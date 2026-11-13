@@ -461,35 +461,55 @@ QwCadStatus qw_cad_render_rgba(const QwCadDocument *document, uint32_t width,
                             (entity->points[0].y - bounds.min_y) * scale);
                 put_pixel(&image, (int)x, (int)y, color);
             }
-            for (point = 1u; point < entity->point_count; ++point) {
-                double x0 = margin +
-                            (entity->points[point - 1u].x - bounds.min_x) *
-                                scale;
-                double y0 = (double)height -
-                            (margin +
-                             (entity->points[point - 1u].y - bounds.min_y) *
-                                 scale);
-                double x1 = margin +
-                            (entity->points[point].x - bounds.min_x) * scale;
-                double y1 = (double)height -
-                            (margin +
-                             (entity->points[point].y - bounds.min_y) * scale);
-                draw_line(&image, x0, y0, x1, y1, color);
-            }
-            if (entity->closed && entity->point_count > 2u) {
-                double x0 = margin +
-                            (entity->points[entity->point_count - 1u].x -
-                             bounds.min_x) * scale;
-                double y0 = (double)height -
-                            (margin +
-                             (entity->points[entity->point_count - 1u].y -
-                              bounds.min_y) * scale);
-                double x1 =
-                    margin + (entity->points[0].x - bounds.min_x) * scale;
-                double y1 = (double)height -
-                            (margin + (entity->points[0].y - bounds.min_y) *
-                                          scale);
-                draw_line(&image, x0, y0, x1, y1, color);
+            {
+                size_t contour;
+                size_t contour_total = entity->contour_count
+                                           ? entity->contour_count
+                                           : 1u;
+                for (contour = 0u; contour < contour_total; ++contour) {
+                    size_t start = entity->contour_count
+                                       ? entity->contour_starts[contour]
+                                       : 0u;
+                    size_t end = entity->contour_count
+                                     ? (contour + 1u < entity->contour_count
+                                            ? entity->contour_starts[contour + 1u]
+                                            : entity->point_count)
+                                     : entity->point_count;
+                    for (point = start + 1u; point < end; ++point) {
+                        double x0 = margin +
+                                    (entity->points[point - 1u].x -
+                                     bounds.min_x) * scale;
+                        double y0 = (double)height -
+                                    (margin +
+                                     (entity->points[point - 1u].y -
+                                      bounds.min_y) * scale);
+                        double x1 = margin +
+                                    (entity->points[point].x - bounds.min_x) *
+                                        scale;
+                        double y1 = (double)height -
+                                    (margin +
+                                     (entity->points[point].y -
+                                      bounds.min_y) * scale);
+                        draw_line(&image, x0, y0, x1, y1, color);
+                    }
+                    if (entity->closed && end > start + 2u) {
+                        double x0 = margin +
+                                    (entity->points[end - 1u].x -
+                                     bounds.min_x) * scale;
+                        double y0 = (double)height -
+                                    (margin +
+                                     (entity->points[end - 1u].y -
+                                      bounds.min_y) * scale);
+                        double x1 = margin +
+                                    (entity->points[start].x - bounds.min_x) *
+                                        scale;
+                        double y1 = (double)height -
+                                    (margin +
+                                     (entity->points[start].y - bounds.min_y) *
+                                         scale);
+                        draw_line(&image, x0, y0, x1, y1, color);
+                    }
+                }
             }
         } else if (entity->kind == QW_CAD_ENTITY_SOLID) {
             QwCadPoint points[4];
@@ -608,6 +628,24 @@ static void svg_entity(SvgBuffer *buffer, const QwCadEntity *entity,
                 svg_printf(buffer, "\" fill=\"%s\" stroke=\"%s\"/>", hex,
                            hex);
             }
+        } else if (entity->contour_count > 1u && entity->closed) {
+            size_t contour;
+            svg_append(buffer, "<path d=\"");
+            for (contour = 0u; contour < entity->contour_count; ++contour) {
+                size_t start = entity->contour_starts[contour];
+                size_t end = contour + 1u < entity->contour_count
+                                 ? entity->contour_starts[contour + 1u]
+                                 : entity->point_count;
+                size_t point;
+                if (end <= start) continue;
+                svg_printf(buffer, "M %.6f,%.6f ", entity->points[start].x,
+                           entity->points[start].y);
+                for (point = start + 1u; point < end; ++point)
+                    svg_printf(buffer, "L %.6f,%.6f ", entity->points[point].x,
+                               entity->points[point].y);
+                svg_append(buffer, "Z ");
+            }
+            svg_printf(buffer, "\" fill=\"none\" stroke=\"%s\"/>", hex);
         } else {
             svg_append(buffer, "<polyline points=\"");
             for (index = 0u; index < entity->point_count; ++index)
@@ -716,6 +754,8 @@ void qw_cad_image_free(QwCadImage *image)
     free(image->pixels);
     memset(image, 0, sizeof(*image));
 }
+
+
 
 
 

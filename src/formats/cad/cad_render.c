@@ -344,6 +344,55 @@ static void fill_polygon_generic(QwCadImage *image, const QwCadPoint *points,
     }
     free(xs);
 }
+static void draw_bulge_segment(QwCadImage *image, QwCadPoint a, QwCadPoint b,
+                               double bulge, double scale, double min_x,
+                               double min_y, double top, double margin,
+                               uint32_t color)
+{
+    double dx = b.x - a.x;
+    double dy = b.y - a.y;
+    double chord = hypot(dx, dy);
+    double theta;
+    double radius;
+    double nx, ny;
+    double cx, cy;
+    double start_angle;
+    int segment;
+    double previous_x = 0.0;
+    double previous_y = 0.0;
+    if (chord < 1e-12 || fabs(bulge) < 1e-9) {
+        draw_line(image, margin + (a.x - min_x) * scale,
+                  top - (margin + (a.y - min_y) * scale),
+                  margin + (b.x - min_x) * scale,
+                  top - (margin + (b.y - min_y) * scale), color);
+        return;
+    }
+    theta = 4.0 * atan(bulge);
+    if (fabs(sin(theta / 2.0)) < 1e-12) {
+        draw_line(image, margin + (a.x - min_x) * scale,
+                  top - (margin + (a.y - min_y) * scale),
+                  margin + (b.x - min_x) * scale,
+                  top - (margin + (b.y - min_y) * scale), color);
+        return;
+    }
+    radius = chord / (2.0 * sin(theta / 2.0));
+    nx = -dy / chord;
+    ny = dx / chord;
+    cx = (a.x + b.x) / 2.0 + nx * (chord / 2.0) / tan(theta / 2.0);
+    cy = (a.y + b.y) / 2.0 + ny * (chord / 2.0) / tan(theta / 2.0);
+    start_angle = atan2(a.y - cy, a.x - cx);
+    for (segment = 0; segment <= 24; ++segment) {
+        double angle = start_angle + theta * (double)segment / 24.0;
+        double x = cx + fabs(radius) * cos(angle);
+        double y = cy + fabs(radius) * sin(angle);
+        double sx = margin + (x - min_x) * scale;
+        double sy = top - (margin + (y - min_y) * scale);
+        if (segment > 0)
+            draw_line(image, previous_x, previous_y, sx, sy, color);
+        previous_x = sx;
+        previous_y = sy;
+    }
+}
 static void draw_text_placeholder(QwCadImage *image, const QwCadEntity *entity,
                                   double x, double y, double scale,
                                   uint32_t color)
@@ -476,21 +525,14 @@ QwCadStatus qw_cad_render_rgba(const QwCadDocument *document, uint32_t width,
                                             : entity->point_count)
                                      : entity->point_count;
                     for (point = start + 1u; point < end; ++point) {
-                        double x0 = margin +
-                                    (entity->points[point - 1u].x -
-                                     bounds.min_x) * scale;
-                        double y0 = (double)height -
-                                    (margin +
-                                     (entity->points[point - 1u].y -
-                                      bounds.min_y) * scale);
-                        double x1 = margin +
-                                    (entity->points[point].x - bounds.min_x) *
-                                        scale;
-                        double y1 = (double)height -
-                                    (margin +
-                                     (entity->points[point].y -
-                                      bounds.min_y) * scale);
-                        draw_line(&image, x0, y0, x1, y1, color);
+                        double bulge = entity->bulges
+                                           ? entity->bulges[point - 1u]
+                                           : 0.0;
+                        draw_bulge_segment(&image,
+                                           entity->points[point - 1u],
+                                           entity->points[point], bulge,
+                                           scale, bounds.min_x, bounds.min_y,
+                                           (double)height, margin, color);
                     }
                     if (entity->closed && end > start + 2u) {
                         double x0 = margin +
@@ -754,6 +796,8 @@ void qw_cad_image_free(QwCadImage *image)
     free(image->pixels);
     memset(image, 0, sizeof(*image));
 }
+
+
 
 
 

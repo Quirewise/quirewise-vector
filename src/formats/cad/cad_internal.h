@@ -1,4 +1,4 @@
-#ifndef QW_CAD_INTERNAL_H
+﻿#ifndef QW_CAD_INTERNAL_H
 #define QW_CAD_INTERNAL_H
 
 #include "quirewise/cad.h"
@@ -40,6 +40,7 @@ typedef struct QwCadEntity {
     double scale_x;
     double scale_y;
     QwCadPoint *points;
+    double *bulges;
     size_t point_count;
     int closed;
     int filled;
@@ -106,3 +107,4 @@ void qw_cad_entity_bounds(const QwCadEntity *entity, QwCadBounds *bounds,
                           int *has_bounds);
 
 #endif
+

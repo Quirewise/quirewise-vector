@@ -1,4 +1,4 @@
-#include "formats/cad/cad_internal.h"
+﻿#include "formats/cad/cad_internal.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -2076,8 +2076,10 @@ static int decode_lwpolyline(DwgBits *bits, QwCadDocument *document,
             }
         }
     }
-    for (index = 0u; index < bulges && index < vertices; ++index)
-        (void)bits_bd(bits);
+    for (index = 0u; index < bulges && index < vertices; ++index) {
+        double bulge = bits_bd(bits);
+        if (entity->bulges) entity->bulges[index] = bulge;
+    }
     for (index = 0u; index < ids; ++index) (void)bits_bl(bits);
     for (index = 0u; index < widths; ++index) {
         (void)bits_bd(bits);
@@ -2440,6 +2442,9 @@ QwCadStatus qw_cad_parse_dwg(const void *data, size_t size,
     *out_document = document;
     return QW_CAD_OK;
 }
+
+
+
 
 
 

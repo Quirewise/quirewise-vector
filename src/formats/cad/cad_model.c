@@ -12,6 +12,7 @@ void qw_cad_entity_release(QwCadEntity *entity)
 {
     if (!entity) return;
     free(entity->points);
+    free(entity->bulges);
     free(entity->contour_starts);
     free(entity->text);
     free(entity->block_name);
@@ -263,6 +264,7 @@ static int expand_entity(QwCadDocument *document, const QwCadEntity *source,
                              capacity);
     copy = *source;
     copy.points = NULL;
+    copy.bulges = NULL;
     copy.contour_starts = NULL;
     copy.contour_count = 0u;
     copy.text = NULL;
@@ -281,7 +283,16 @@ static int expand_entity(QwCadDocument *document, const QwCadEntity *source,
             transform_point(&transform, &copy.points[index].x,
                             &copy.points[index].y);
     }
-    if (source->contour_count) {
+    if (source->bulges && source->point_count) {
+        copy.bulges =
+            (double *)malloc(source->point_count * sizeof(*copy.bulges));
+        if (!copy.bulges) {
+            free(copy.points);
+            return 0;
+        }
+        memcpy(copy.bulges, source->bulges,
+               source->point_count * sizeof(*copy.bulges));
+    }    if (source->contour_count) {
         copy.contour_starts =
             (size_t *)malloc(source->contour_count * sizeof(*copy.contour_starts));
         if (!copy.contour_starts) {
@@ -357,6 +368,8 @@ void qw_cad_document_expand_inserts(QwCadDocument *document)
         block->entity_capacity = 0u;
     }
 }
+
+
 
 
 

@@ -222,6 +222,32 @@ int main(void)
         }
         qw_cad_document_free(hatch);
     }
+    {
+        static const char bulge_dxf[] =
+            "0\nSECTION\n2\nENTITIES\n"
+            "0\nLWPOLYLINE\n8\n0\n90\n3\n70\n0\n"
+            "10\n0\n20\n0\n42\n-1\n10\n100\n20\n0\n"
+            "10\n100\n20\n100\n"
+            "0\nENDSEC\n0\nEOF\n";
+        QwCadDocument *bulge_doc = NULL;
+        QwCadImage bulge_image;
+        ok &= check(qw_cad_parse(bulge_dxf, sizeof(bulge_dxf) - 1u,
+                                 &bulge_doc) == QW_CAD_OK &&
+                        bulge_doc && qw_cad_entity_count(bulge_doc) == 1u,
+                    "lwpolyline bulge parse");
+        memset(&bulge_image, 0, sizeof(bulge_image));
+        if (bulge_doc &&
+            qw_cad_render_rgba(bulge_doc, 200u, &bulge_image) == QW_CAD_OK) {
+            size_t center = ((size_t)(bulge_image.height / 2u) *
+                                 bulge_image.width +
+                             bulge_image.width / 2u) * 4u;
+            ok &= check(bulge_image.pixels[center] != 255u ||
+                            bulge_image.pixels[center + 1u] != 255u,
+                        "lwpolyline bulge arc ink");
+        }
+        qw_cad_image_free(&bulge_image);
+        qw_cad_document_free(bulge_doc);
+    }
     binary_size = build_binary_dxf(binary);
     ok &= check(qw_cad_probe(binary, binary_size), "binary probe");
     ok &= check(qw_cad_parse(binary, binary_size, &document) == QW_CAD_OK,
@@ -409,6 +435,8 @@ int main(void)
     printf("cad dxf tests passed\n");
     return 0;
 }
+
+
 
 
 

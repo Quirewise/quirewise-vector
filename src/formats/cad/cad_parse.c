@@ -1,4 +1,4 @@
-﻿#include "formats/cad/cad_internal.h"
+#include "formats/cad/cad_internal.h"
 
 #include <quirewise/charset.h>
 
@@ -520,6 +520,7 @@ char *qw_cad_text_utf8(const QwCadDocument *document, const char *input,
 static void entity_clear(QwCadEntity *entity)
 {
     free(entity->points);
+    free(entity->bulges);
     free(entity->contour_starts);
     free(entity->text);
     free(entity->block_name);
@@ -533,10 +534,19 @@ static int entity_add_point(QwCadEntity *entity, QwCadPoint point)
         size_t next = entity->point_count ? entity->point_count * 2u : 8u;
         QwCadPoint *grown = (QwCadPoint *)realloc(
             entity->points, next * sizeof(*entity->points));
+        double *bulges;
         if (!grown) return 0;
         entity->points = grown;
+        bulges = (double *)realloc(entity->bulges,
+                                   next * sizeof(*bulges));
+        if (!bulges) return 0;
+        entity->bulges = bulges;
+        memset(entity->bulges + entity->point_count, 0,
+               (next - entity->point_count) * sizeof(*bulges));
     }
-    entity->points[entity->point_count++] = point;
+    entity->points[entity->point_count] = point;
+    entity->bulges[entity->point_count] = 0.0;
+    ++entity->point_count;
     return 1;
 }
 
@@ -574,6 +584,11 @@ static int parse_lwpolyline(QwCadParser *parser, QwCadEntity *entity,
                 entity->points[entity->point_count - 1u].y =
                     pair_double(&pair);
             }
+            break;
+        case 42:
+            if (entity->point_count > 0u)
+                entity->bulges[entity->point_count - 1u] =
+                    pair_double(&pair);
             break;
         default: break;
         }
@@ -1620,6 +1635,8 @@ void qw_cad_buffer_free(void *buffer)
 {
     free(buffer);
 }
+
+
 
 
 

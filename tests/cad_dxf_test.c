@@ -333,9 +333,18 @@ int main(void)
             data = load_file(path, &size);
             if (data) {
                 QwCadDocument *drawing = NULL;
-                if (qw_cad_parse(data, size, &drawing) == QW_CAD_OK && drawing)
-                    ok &= check(qw_cad_entity_count(drawing) > 0u,
+                if (qw_cad_parse(data, size, &drawing) == QW_CAD_OK && drawing) {
+                    QwCadTextInfo info;
+                    ok &= check(qw_cad_entity_count(drawing) == 87u,
                                 names[name_index]);
+                    ok &= check(qw_cad_text_count(drawing) == 2u &&
+                                    qw_cad_text_at(drawing, 0u, &info) ==
+                                        QW_CAD_OK &&
+                                    info.text_size == 13u &&
+                                    memcmp(info.text, "teksto simpla", 13u) ==
+                                        0,
+                                "R2013+ text extraction");
+                }
                 qw_cad_document_free(drawing);
                 free(data);
             }
@@ -347,9 +356,17 @@ int main(void)
             QW_CAD_TEST_DATA_DIR "/lw_example2007.dwg", &size);
         if (data) {
             QwCadDocument *drawing = NULL;
-            if (qw_cad_parse(data, size, &drawing) == QW_CAD_OK && drawing)
-                ok &= check(qw_cad_entity_count(drawing) > 0u,
+            if (qw_cad_parse(data, size, &drawing) == QW_CAD_OK && drawing) {
+                QwCadTextInfo info;
+                ok &= check(qw_cad_entity_count(drawing) == 87u,
                             "R2007 mixed entities");
+                ok &= check(qw_cad_text_count(drawing) == 2u &&
+                                qw_cad_text_at(drawing, 0u, &info) ==
+                                    QW_CAD_OK &&
+                                info.text_size == 13u &&
+                                memcmp(info.text, "teksto simpla", 13u) == 0,
+                            "R2007 text extraction");
+            }
             qw_cad_document_free(drawing);
             free(data);
         }
@@ -392,6 +409,7 @@ int main(void)
     printf("cad dxf tests passed\n");
     return 0;
 }
+
 
 
 

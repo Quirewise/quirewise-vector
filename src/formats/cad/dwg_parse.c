@@ -1,4 +1,4 @@
-﻿#include "formats/cad/cad_internal.h"
+#include "formats/cad/cad_internal.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -1694,6 +1694,230 @@ static int text_utf8_printable(const uint8_t *data, size_t size)
     return size > 0u && printable >= (int)size;
 }
 
+static int utf16_text_plausible(const uint16_t *units, size_t count)
+{
+    size_t index;
+    int alnum = 0;
+    int printable = 0;
+    if (count == 0u || count > 256u) return 0;
+    for (index = 0u; index < count; ++index) {
+        uint16_t unit = units[index];
+        if (unit == 0u) return 0;
+        if (unit >= 0x20u && unit != 0x7Fu) ++printable;
+        if ((unit >= '0' && unit <= '9') || (unit >= 'A' && unit <= 'Z') ||
+            (unit >= 'a' && unit <= 'z'))
+            ++alnum;
+    }
+    return printable == (int)count && alnum > 0;
+}
+
+static char *utf16_units_to_utf8(const uint16_t *units, size_t count,
+                                 size_t *out_size)
+{
+    char *out = (char *)calloc(count * 3u + 1u, 1u);
+    size_t used = 0u;
+    size_t index;
+    if (!out) return NULL;
+    for (index = 0u; index < count; ++index) {
+        uint32_t code = units[index];
+        if (code >= 0xD800u && code <= 0xDBFFu && index + 1u < count) {
+            uint32_t low = units[index + 1u];
+            if (low >= 0xDC00u && low <= 0xDFFFu) {
+                code = 0x10000u + ((code - 0xD800u) << 10u) +
+                       (low - 0xDC00u);
+                ++index;
+            }
+        }
+        if (code < 0x80u) {
+            out[used++] = (char)code;
+        } else if (code < 0x800u) {
+            out[used++] = (char)(0xC0u | (code >> 6u));
+            out[used++] = (char)(0x80u | (code & 0x3Fu));
+        } else if (code < 0x10000u) {
+            out[used++] = (char)(0xE0u | (code >> 12u));
+            out[used++] = (char)(0x80u | ((code >> 6u) & 0x3Fu));
+            out[used++] = (char)(0x80u | (code & 0x3Fu));
+        } else {
+            out[used++] = (char)(0xF0u | (code >> 18u));
+            out[used++] = (char)(0x80u | ((code >> 12u) & 0x3Fu));
+            out[used++] = (char)(0x80u | ((code >> 6u) & 0x3Fu));
+            out[used++] = (char)(0x80u | (code & 0x3Fu));
+        }
+    }
+    out[used] = '\0';
+    if (out_size) *out_size = used;
+    return out;
+}
+
+static char *scan_utf16_run(DwgBits *bits, size_t *out_size)
+{
+    uint64_t position;
+    char *best = NULL;
+    size_t best_size = 0u;
+    size_t best_score = 0u;
+    for (position = bits->bit; position + 32u < bits->limit; ++position) {
+        DwgBits cursor = *bits;
+        uint16_t units[256];
+        size_t count = 0u;
+        size_t index;
+        char *candidate;
+        size_t candidate_size = 0u;
+        size_t alnum = 0u;
+        bits_set(&cursor, position);
+        while (count < 256u && cursor.bit + 16u <= bits->limit) {
+            uint16_t unit = (uint16_t)bits_rs(&cursor);
+            if (cursor.failed || unit < 0x20u || unit == 0x7Fu) break;
+            units[count++] = unit;
+            if ((unit >= '0' && unit <= '9') ||
+                (unit >= 'A' && unit <= 'Z') ||
+                (unit >= 'a' && unit <= 'z'))
+                ++alnum;
+        }
+        if (count < 2u || alnum < 2u) continue;
+        {
+            size_t leading_non_ascii = 0u;
+            while (leading_non_ascii < count &&
+                   units[leading_non_ascii] > 0x7Fu)
+                ++leading_non_ascii;
+            if (leading_non_ascii > 0u && count - leading_non_ascii >= 2u) {
+                memmove(units, units + leading_non_ascii,
+                        (count - leading_non_ascii) * sizeof(units[0]));
+                count -= leading_non_ascii;
+            }
+        }
+        {
+            size_t ascii_lead = 0u;
+            size_t tail = count;
+            size_t trailing_non_ascii = 0u;
+            while (ascii_lead < count &&
+                   ((units[ascii_lead] >= '0' && units[ascii_lead] <= '9') ||
+                    (units[ascii_lead] >= 'A' && units[ascii_lead] <= 'Z') ||
+                    (units[ascii_lead] >= 'a' && units[ascii_lead] <= 'z')))
+                ++ascii_lead;
+            while (tail > 0u && units[tail - 1u] > 0x7Fu) {
+                --tail;
+                ++trailing_non_ascii;
+            }
+            if (ascii_lead >= 2u && trailing_non_ascii >= 1u) {
+                while (tail > 0u &&
+                       !((units[tail - 1u] >= '0' && units[tail - 1u] <= '9') ||
+                         (units[tail - 1u] >= 'A' && units[tail - 1u] <= 'Z') ||
+                         (units[tail - 1u] >= 'a' && units[tail - 1u] <= 'z')))
+                    --tail;
+                if (tail >= 2u) count = tail;
+            } else if (ascii_lead >= 2u && count > 2u &&
+                       units[count - 1u] == '*') {
+                --count;
+            }
+        }
+        for (index = 0u; index < count; ++index) {
+            if (units[index] == 0u) break;
+        }
+        if (index != count) continue;
+        candidate = utf16_units_to_utf8(units, count, &candidate_size);
+        if (!candidate) continue;
+        if (count > best_score) {
+            free(best);
+            best = candidate;
+            best_size = candidate_size;
+            best_score = count;
+        } else {
+            free(candidate);
+        }
+    }
+    if (best_size) *out_size = best_size;
+    return best;
+}
+static char *scan_utf16_text(DwgBits *bits, size_t *out_size)
+{
+    uint64_t position;
+    char *best = NULL;
+    size_t best_size = 0u;
+    size_t best_score = 0u;
+    for (position = bits->bit; position + 16u < bits->limit; ++position) {
+        DwgBits cursor = *bits;
+        uint16_t length;
+        uint16_t units[256];
+        uint16_t index;
+        char *candidate;
+        size_t candidate_size = 0u;
+        size_t score;
+        bits_set(&cursor, position);
+        length = bits_rs(&cursor);
+        if (cursor.failed || length == 0u || length > 256u) continue;
+        if (cursor.bit + (uint64_t)length * 16u > bits->limit) continue;
+        for (index = 0u; index < length; ++index)
+            units[index] = (uint16_t)bits_rs(&cursor);
+        if (cursor.failed ||
+            !utf16_text_plausible(units, (size_t)length))
+            continue;
+        candidate = utf16_units_to_utf8(units, (size_t)length,
+                                        &candidate_size);
+        if (!candidate) continue;
+        score = (size_t)length;
+        if (score > best_score) {
+            free(best);
+            best = candidate;
+            best_size = candidate_size;
+            best_score = score;
+        } else {
+            free(candidate);
+        }
+    }
+    if (best_size) *out_size = best_size;
+    return best;
+}
+
+static int decode_text_scan(DwgBits *bits, QwCadDocument *document,
+                            const DwgHead *head, int legacy)
+{
+    uint8_t flags = bits_rc(bits);
+    double elevation = 0.0;
+    double ix, iy, height;
+    double rotation = 0.0;
+    char *text;
+    size_t text_size = 0u;
+    QwCadEntity *entity;
+    (void)legacy;
+    if (!(flags & 0x01u)) elevation = bits_rd(bits);
+    ix = bits_rd(bits);
+    iy = bits_rd(bits);
+    if (!(flags & 0x02u)) {
+        (void)bits_dd(bits, ix);
+        (void)bits_dd(bits, iy);
+    }
+    {
+        double ex, ey, ez;
+        bits_be(bits, &ex, &ey, &ez, 0);
+        (void)ex; (void)ey; (void)ez;
+    }
+    (void)bits_bt(bits, 0);
+    if (!(flags & 0x04u)) (void)bits_rd(bits);
+    if (!(flags & 0x08u)) rotation = bits_rd(bits);
+    height = bits_rd(bits);
+    if (!(flags & 0x10u)) (void)bits_rd(bits);
+    (void)elevation;
+    if (bits->failed || !sane_number(ix) || !sane_number(iy) ||
+        !sane_number(height) || height <= 0.0 || height > 1e9)
+        return 0;
+    text = scan_utf16_run(bits, &text_size);
+    if (!text) text = scan_utf16_text(bits, &text_size);
+    if (!text) return 0;
+    entity = qw_cad_document_add_entity(document);
+    if (!entity) {
+        free(text);
+        return 0;
+    }
+    entity->kind = QW_CAD_ENTITY_TEXT;
+    entity->p[0].x = ix;
+    entity->p[0].y = iy;
+    entity->height = height;
+    entity->rotation = rotation * 180.0 / M_PI;
+    entity->text = text;
+    entity->text_size = text_size;
+    set_entity_color(entity, head);
+    return 1;
+}
 static int decode_text(DwgBits *bits, QwCadDocument *document,
                        const DwgHead *head, int legacy)
 {
@@ -1959,7 +2183,7 @@ static int parse_entity_record(const uint8_t *data, size_t size,
         if (bits.failed) return 0;
     }
     decoder = decoder_for(type);
-    if (version >= 2 && type == 0x01) decoder = NULL;
+    if (version >= 2 && type == 0x01) decoder = decode_text_scan;
     if (!decoder) {
         if (getenv("QUIREWISE_CAD_DWG_TRACE"))
             fprintf(stderr, "DWG handle %llu type 0x%X unsupported\n",
@@ -2216,6 +2440,11 @@ QwCadStatus qw_cad_parse_dwg(const void *data, size_t size,
     *out_document = document;
     return QW_CAD_OK;
 }
+
+
+
+
+
 
 
 

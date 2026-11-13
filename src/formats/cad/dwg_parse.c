@@ -226,6 +226,11 @@ static int finite_number(double value)
     return value == value && value > -1e308 && value < 1e308;
 }
 
+static int sane_number(double value)
+{
+    return finite_number(value) && fabs(value) < 1e9;
+}
+
 static uint32_t le32(const uint8_t *data)
 {
     return (uint32_t)data[0] | ((uint32_t)data[1] << 8u) |
@@ -346,6 +351,545 @@ static int parse_object_map(const uint8_t *data, size_t size, DwgRefs *refs)
     return refs->count > 0u;
 }
 
+/* ---- R2004+ Autodesk LZ77 (byte stream) ---- */
+
+typedef struct LzStream {
+    const uint8_t *data;
+    size_t size;
+    size_t at;
+} LzStream;
+
+static int lz_take(LzStream *stream, uint8_t *out)
+{
+    if (stream->at >= stream->size) return 0;
+    *out = stream->data[stream->at++];
+    return 1;
+}
+
+static int lz_split_word(LzStream *stream, int *offset, int *lit_count)
+{
+    uint8_t b1, b2;
+    if (!lz_take(stream, &b1) || !lz_take(stream, &b2)) return 0;
+    *offset = (int)(b1 >> 2) | ((int)b2 << 6);
+    *lit_count = (int)(b1 & 0x03u);
+    return 1;
+}
+
+static int lz_extended_count(LzStream *stream, int *out)
+{
+    uint8_t b;
+    int total = 0;
+    if (!lz_take(stream, &b)) return 0;
+    if (b == 0u) {
+        total = 0xFF;
+        for (;;) {
+            uint8_t next;
+            if (!lz_take(stream, &next)) return 0;
+            if (next != 0u) {
+                b = next;
+                break;
+            }
+            total += 0xFF;
+        }
+    }
+    *out = total + (int)b;
+    return 1;
+}
+
+static int lz_literal_run(LzStream *stream, int *length, uint8_t *next_op)
+{
+    uint8_t b;
+    if (!lz_take(stream, &b)) return 0;
+    if (b >= 0x01u && b <= 0x0Fu) {
+        *length = (int)b + 3;
+        *next_op = 0u;
+        return 1;
+    }
+    if ((b & 0xF0u) != 0u) {
+        *length = 0;
+        *next_op = b;
+        return 1;
+    }
+    if (b == 0u) {
+        int total = 0x0F;
+        for (;;) {
+            uint8_t next;
+            if (!lz_take(stream, &next)) return 0;
+            if (next != 0u) {
+                *length = total + (int)next + 3;
+                *next_op = 0u;
+                return 1;
+            }
+            total += 0xFF;
+        }
+    }
+    *length = 0;
+    *next_op = 0u;
+    return 1;
+}
+
+static int lz_emit_literals(LzStream *stream, uint8_t *out, size_t capacity,
+                            size_t *used, int length)
+{
+    if (length < 0) return 0;
+    if (length == 0) return 1;
+    if ((size_t)length > stream->size - stream->at) return 0;
+    if (*used + (size_t)length > capacity) return 0;
+    memcpy(out + *used, stream->data + stream->at, (size_t)length);
+    stream->at += (size_t)length;
+    *used += (size_t)length;
+    return 1;
+}
+
+static int lz_emit_window(uint8_t *out, size_t capacity, size_t *used,
+                          int distance, int length)
+{
+    size_t base;
+    int index;
+    if (distance <= 0 || length <= 0) return 0;
+    if (*used + (size_t)length > capacity) return 0;
+    if ((size_t)distance > *used) return 0;
+    base = *used - (size_t)distance;
+    for (index = 0; index < length; ++index) {
+        out[*used] = out[base + (size_t)index];
+        ++*used;
+    }
+    return 1;
+}
+
+static uint8_t *lz_decompress(const uint8_t *source, size_t source_size,
+                              size_t target_size, size_t *out_size)
+{
+    uint8_t *output;
+    size_t used = 0u;
+    LzStream stream;
+    int literal_length;
+    uint8_t next_op = 0u;
+    if (target_size == 0u) {
+        *out_size = 0u;
+        return (uint8_t *)calloc(1u, 1u);
+    }
+    output = (uint8_t *)calloc(1u, target_size);
+    if (!output) return NULL;
+    memset(&stream, 0, sizeof(stream));
+    stream.data = source;
+    stream.size = source_size;
+    if (!lz_literal_run(&stream, &literal_length, &next_op) ||
+        !lz_emit_literals(&stream, output, target_size, &used,
+                          literal_length)) {
+        free(output);
+        return NULL;
+    }
+    while (stream.at < stream.size) {
+        int copy_length = 0;
+        int back_offset = 0;
+        int lit_count = 0;
+        if (next_op == 0u && !lz_take(&stream, &next_op)) break;
+        {
+            uint8_t op = next_op;
+            next_op = 0u;
+            if (op == 0x11u) break;
+            if (op >= 0x40u) {
+                uint8_t op2;
+                copy_length = (int)((op & 0xF0u) >> 4) - 1;
+                if (!lz_take(&stream, &op2)) {
+                    free(output);
+                    return NULL;
+                }
+                back_offset = ((int)op2 << 2) | ((int)(op & 0x0Cu) >> 2);
+                if (op & 0x03u) {
+                    literal_length = (int)(op & 0x03u);
+                } else if (!lz_literal_run(&stream, &literal_length,
+                                           &next_op)) {
+                    free(output);
+                    return NULL;
+                }
+                (void)lit_count;
+            } else {
+                int base_length = 0;
+                int op_base = 0;
+                int ext = 0;
+                if (op >= 0x10u && op <= 0x10u) {
+                    base_length = 9;
+                    ext = 1;
+                    op_base = 0x3FFF;
+                } else if (op >= 0x12u && op <= 0x1Fu) {
+                    base_length = 2 + (int)(op & 0x0Fu);
+                    op_base = 0x3FFF;
+                } else if (op == 0x20u) {
+                    base_length = 0x21;
+                    ext = 1;
+                } else if (op >= 0x21u && op <= 0x3Fu) {
+                    base_length = (int)op - 0x1E;
+                } else {
+                    free(output);
+                    return NULL;
+                }
+                copy_length = base_length;
+                if (ext) {
+                    int extra;
+                    if (!lz_extended_count(&stream, &extra)) {
+                        free(output);
+                        return NULL;
+                    }
+                    copy_length += extra;
+                }
+                if (!lz_split_word(&stream, &back_offset, &lit_count)) {
+                    free(output);
+                    return NULL;
+                }
+                back_offset += op_base;
+                if (lit_count == 0) {
+                    if (!lz_literal_run(&stream, &literal_length, &next_op)) {
+                        free(output);
+                        return NULL;
+                    }
+                } else {
+                    literal_length = lit_count;
+                }
+            }
+        }
+        if (copy_length <= 0 ||
+            !lz_emit_window(output, target_size, &used, back_offset + 1,
+                            copy_length) ||
+            !lz_emit_literals(&stream, output, target_size, &used,
+                              literal_length)) {
+            free(output);
+            return NULL;
+        }
+    }
+    *out_size = used;
+    return output;
+}
+
+static int r2004_header(const uint8_t *data, size_t size, uint64_t *page_map,
+                        uint32_t *section_map_id)
+{
+    uint8_t key[0x6C];
+    uint8_t plain[0x6C];
+    uint32_t seed = 1u;
+    size_t index;
+    if (size < 0x80u + 0x6Cu) return 0;
+    for (index = 0u; index < sizeof(key); ++index) {
+        seed = seed * 0x343FDu + 0x269EC3u;
+        key[index] = (uint8_t)(seed >> 16u);
+    }
+    for (index = 0u; index < sizeof(plain); ++index)
+        plain[index] = data[0x80u + index] ^ key[index];
+    {
+        uint64_t value = 0u;
+        for (index = 0u; index < 8u; ++index)
+            value |= (uint64_t)plain[0x54u + index] << (8u * index);
+        *page_map = value;
+    }
+    *section_map_id = le32(plain + 0x5Cu);
+    return 1;
+}
+
+static int system_section(const uint8_t *data, size_t size, uint64_t address,
+                          uint32_t expected_signature, uint8_t **out,
+                          size_t *out_size)
+{
+    uint32_t signature, plain_size, packed_size, codec;
+    size_t start;
+    if (address > size || size - (size_t)address < 20u) return 0;
+    start = (size_t)address;
+    signature = le32(data + start);
+    plain_size = le32(data + start + 4u);
+    packed_size = le32(data + start + 8u);
+    codec = le32(data + start + 12u);
+    if (signature != expected_signature) return 0;
+    if (packed_size == 0u) {
+        *out = NULL;
+        *out_size = 0u;
+        return 1;
+    }
+    if (start + 20u + packed_size > size) return 0;
+    if (codec == 1u) {
+        if (plain_size > packed_size) return 0;
+        *out = (uint8_t *)malloc(plain_size ? plain_size : 1u);
+        if (!*out) return 0;
+        memcpy(*out, data + start + 20u, plain_size);
+        *out_size = plain_size;
+        return 1;
+    }
+    if (codec == 2u) {
+        *out = lz_decompress(data + start + 20u, packed_size, plain_size,
+                             out_size);
+        return *out != NULL;
+    }
+    return 0;
+}
+
+typedef struct DwgPageSlot {
+    int32_t id;
+    uint64_t address;
+} DwgPageSlot;
+
+typedef struct DwgPageSlots {
+    DwgPageSlot *items;
+    size_t count;
+    size_t capacity;
+} DwgPageSlots;
+
+static int page_slots_add(DwgPageSlots *slots, int32_t id, uint64_t address)
+{
+    if (slots->count == slots->capacity) {
+        size_t next = slots->capacity ? slots->capacity * 2u : 64u;
+        DwgPageSlot *grown =
+            (DwgPageSlot *)realloc(slots->items, next * sizeof(*grown));
+        if (!grown) return 0;
+        slots->items = grown;
+        slots->capacity = next;
+    }
+    slots->items[slots->count].id = id;
+    slots->items[slots->count].address = address;
+    ++slots->count;
+    return 1;
+}
+
+static int parse_page_map(const uint8_t *data, size_t size, uint64_t address,
+                          DwgPageSlots *slots)
+{
+    uint8_t *blob = NULL;
+    size_t blob_size = 0u;
+    size_t position = 0u;
+    uint64_t page_address = 0x100u;
+    if (!system_section(data, size, address + 0x100u, 0x41630E3Bu, &blob,
+                        &blob_size))
+        return 0;
+    while (position + 8u <= blob_size) {
+        int32_t id;
+        uint32_t page_size;
+        memcpy(&id, blob + position, 4u);
+        page_size = le32(blob + position + 4u);
+        position += 8u;
+        if (!page_slots_add(slots, id, page_address)) {
+            free(blob);
+            return 0;
+        }
+        page_address += page_size;
+        if (id < 0) {
+            if (position + 16u > blob_size) {
+                free(blob);
+                return 0;
+            }
+            position += 16u;
+        }
+    }
+    free(blob);
+    return 1;
+}
+
+typedef struct DwgSectionEntry {
+    uint64_t size;
+    uint32_t max_decompressed;
+    uint32_t compressed;
+    uint32_t encrypted;
+    char name[65];
+    uint32_t *page_ids;
+    uint32_t page_count;
+} DwgSectionEntry;
+
+typedef struct DwgSections {
+    DwgSectionEntry *items;
+    size_t count;
+    size_t capacity;
+} DwgSections;
+
+static void sections_free(DwgSections *sections)
+{
+    size_t index;
+    for (index = 0u; index < sections->count; ++index)
+        free(sections->items[index].page_ids);
+    free(sections->items);
+    sections->items = NULL;
+    sections->count = 0u;
+    sections->capacity = 0u;
+}
+
+static int sections_add(DwgSections *sections, const char *name,
+                        const uint8_t *description, uint32_t page_count)
+{
+    DwgSectionEntry *entry;
+    if (sections->count == sections->capacity) {
+        size_t next = sections->capacity ? sections->capacity * 2u : 16u;
+        DwgSectionEntry *grown =
+            (DwgSectionEntry *)realloc(sections->items, next * sizeof(*grown));
+        if (!grown) return 0;
+        sections->items = grown;
+        sections->capacity = next;
+    }
+    entry = &sections->items[sections->count++];
+    memset(entry, 0, sizeof(*entry));
+    memcpy(&entry->size, description, 8u);
+    entry->max_decompressed = le32(description + 12u);
+    entry->compressed = le32(description + 20u);
+    entry->encrypted = le32(description + 28u);
+    if (description[32u]) {
+        size_t length = strnlen((const char *)description + 32u, 64u);
+        if (length > 64u) length = 64u;
+        memcpy(entry->name, description + 32u, length);
+        entry->name[length] = '\0';
+    }
+    (void)name;
+    entry->page_count = page_count;
+    if (page_count) {
+        entry->page_ids =
+            (uint32_t *)calloc(page_count, sizeof(*entry->page_ids));
+        if (!entry->page_ids) return 0;
+    }
+    return 1;
+}
+
+static const DwgPageSlot *find_page(const DwgPageSlots *slots, int32_t id)
+{
+    size_t index;
+    for (index = 0u; index < slots->count; ++index) {
+        if (slots->items[index].id == id) return &slots->items[index];
+    }
+    return NULL;
+}
+
+static int parse_section_map(const uint8_t *data, size_t size,
+                             uint32_t section_map_id,
+                             const DwgPageSlots *slots, DwgSections *sections)
+{
+    const DwgPageSlot *map_page = find_page(slots, (int32_t)section_map_id);
+    uint8_t *blob = NULL;
+    size_t blob_size = 0u;
+    uint32_t entry_count;
+    size_t position;
+    uint32_t index;
+    if (!map_page) return 0;
+    if (!system_section(data, size, map_page->address, 0x4163003Bu, &blob,
+                        &blob_size))
+        return 0;
+    if (blob_size < 20u) {
+        free(blob);
+        return 0;
+    }
+    entry_count = le32(blob);
+    if (entry_count > 4096u) {
+        free(blob);
+        return 0;
+    }
+    position = 20u;
+    for (index = 0u; index < entry_count; ++index) {
+        uint32_t page_count;
+        uint32_t page;
+        DwgSectionEntry *entry;
+        if (position + 96u > blob_size) {
+            free(blob);
+            return 0;
+        }
+        page_count = le32(blob + position + 8u);
+        if (page_count > 65536u ||
+            !sections_add(sections, NULL, blob + position, page_count)) {
+            free(blob);
+            return 0;
+        }
+        entry = &sections->items[sections->count - 1u];
+        position += 96u;
+        for (page = 0u; page < page_count; ++page) {
+            if (position + 16u > blob_size) {
+                free(blob);
+                return 0;
+            }
+            entry->page_ids[page] = le32(blob + position);
+            position += 16u;
+        }
+    }
+    free(blob);
+    return 1;
+}
+
+static uint8_t *load_section_page(const uint8_t *data, size_t size,
+                                  const DwgPageSlot *slot,
+                                  const DwgSectionEntry *section,
+                                  size_t *out_size)
+{
+    uint8_t header[32];
+    uint32_t mask;
+    uint32_t signature;
+    uint32_t packed_size;
+    size_t index;
+    if (slot->address > size || size - (size_t)slot->address < 32u) return NULL;
+    memcpy(header, data + slot->address, 32u);
+    mask = 0x4164536Bu ^ (uint32_t)slot->address;
+    for (index = 0u; index + 4u <= 32u; index += 4u) {
+        uint32_t value;
+        memcpy(&value, header + index, 4u);
+        value ^= mask;
+        memcpy(header + index, &value, 4u);
+    }
+    signature = le32(header);
+    if (signature != 0x4163043Bu) return NULL;
+    packed_size = le32(header + 8u);
+    if (slot->address + 32u + packed_size > size) return NULL;
+    if (section->compressed == 2u)
+        return lz_decompress(data + slot->address + 32u, packed_size,
+                             section->max_decompressed, out_size);
+    *out_size = packed_size;
+    {
+        uint8_t *copy = (uint8_t *)malloc(packed_size ? packed_size : 1u);
+        if (!copy) return NULL;
+        memcpy(copy, data + slot->address + 32u, packed_size);
+        return copy;
+    }
+}
+
+static uint8_t *assemble_section(const uint8_t *data, size_t size,
+                                 const DwgSections *sections,
+                                 const DwgPageSlots *slots, const char *name,
+                                 size_t *out_size)
+{
+    size_t section_index;
+    for (section_index = 0u; section_index < sections->count;
+         ++section_index) {
+        const DwgSectionEntry *section = &sections->items[section_index];
+        uint8_t *output;
+        size_t capacity;
+        size_t used = 0u;
+        uint32_t page;
+        if (strcmp(section->name, name) != 0) continue;
+        if (section->encrypted == 1u) return NULL;
+        capacity = (size_t)section->max_decompressed * section->page_count;
+        output = (uint8_t *)malloc(capacity ? capacity : 1u);
+        if (!output) return NULL;
+        for (page = 0u; page < section->page_count; ++page) {
+            const DwgPageSlot *slot = find_page(slots,
+                                                (int32_t)section->page_ids[page]);
+            uint8_t *page_data;
+            size_t page_size = 0u;
+            if (!slot || (page_data = load_section_page(data, size, slot,
+                                                        section, &page_size)) ==
+                             NULL) {
+                free(output);
+                return NULL;
+            }
+            if (used + page_size > capacity) {
+                size_t cap = used + page_size;
+                uint8_t *grown = (uint8_t *)realloc(output, cap);
+                if (!grown) {
+                    free(page_data);
+                    free(output);
+                    return NULL;
+                }
+                output = grown;
+                capacity = cap;
+            }
+            memcpy(output + used, page_data, page_size);
+            used += page_size;
+            free(page_data);
+        }
+        if (section->size > 0u && section->size <= used)
+            used = (size_t)section->size;
+        *out_size = used;
+        return output;
+    }
+    return NULL;
+}
 static void parse_color_head(DwgBits *bits, DwgHead *head)
 {
     uint8_t no_links = bits_read(bits, 1u);
@@ -472,8 +1016,8 @@ static int decode_line(DwgBits *bits, QwCadDocument *document,
     (void)bits_bt(bits, legacy);
     bits_be(bits, &ex, &ey, &ez, legacy);
     (void)ex; (void)ey; (void)ez; (void)ze;
-    if (bits->failed || !finite_number(xs) || !finite_number(xe) ||
-        !finite_number(ys) || !finite_number(ye))
+    if (bits->failed || !sane_number(xs) || !sane_number(xe) ||
+        !sane_number(ys) || !sane_number(ye))
         return 0;
     entity = qw_cad_document_add_entity(document);
     if (!entity) return 0;
@@ -498,8 +1042,8 @@ static int decode_circle(DwgBits *bits, QwCadDocument *document,
     (void)bits_bt(bits, legacy);
     bits_be(bits, &ex, &ey, &ez, legacy);
     (void)cz; (void)ex; (void)ey; (void)ez;
-    if (bits->failed || !finite_number(cx) || !finite_number(cy) ||
-        !finite_number(radius) || radius <= 0.0)
+    if (bits->failed || !sane_number(cx) || !sane_number(cy) ||
+        !sane_number(radius) || radius <= 0.0 || radius > 1e9)
         return 0;
     entity = qw_cad_document_add_entity(document);
     if (!entity) return 0;
@@ -526,8 +1070,8 @@ static int decode_arc(DwgBits *bits, QwCadDocument *document,
     start_angle = bits_bd(bits);
     end_angle = bits_bd(bits);
     (void)cz; (void)ex; (void)ey; (void)ez;
-    if (bits->failed || !finite_number(cx) || !finite_number(cy) ||
-        !finite_number(radius) || radius <= 0.0 ||
+    if (bits->failed || !sane_number(cx) || !sane_number(cy) ||
+        !sane_number(radius) || radius <= 0.0 || radius > 1e9 ||
         !finite_number(start_angle) || !finite_number(end_angle))
         return 0;
     entity = qw_cad_document_add_entity(document);
@@ -632,6 +1176,9 @@ static int decode_text(DwgBits *bits, QwCadDocument *document,
     if (!(flags & 0x10u)) width_factor = bits_rd(bits);
     (void)elevation; (void)width_factor; (void)ex; (void)ey; (void)ez;
     if (bits->failed) return 0;
+    if (!sane_number(ix) || !sane_number(iy) || !sane_number(height) ||
+        height <= 0.0 || height > 1e9)
+        return 0;
     if (getenv("QUIREWISE_CAD_DWG_TRACE"))
         fprintf(stderr, "TEXT h=%llu flags=0x%X h=%.3f pos=%llu err=%d\n",
                 (unsigned long long)head->handle, flags, height,
@@ -736,16 +1283,19 @@ static int decode_lwpolyline(DwgBits *bits, QwCadDocument *document,
             for (index = 0u; index < vertices; ++index) {
                 x = bits_rd(bits);
                 y = bits_rd(bits);
-                if (bits->failed || !polyline_add_point(entity, x, y)) return 0;
+                if (bits->failed || !sane_number(x) || !sane_number(y) ||
+                    !polyline_add_point(entity, x, y)) return 0;
             }
         } else {
             x = bits_rd(bits);
             y = bits_rd(bits);
-            if (bits->failed || !polyline_add_point(entity, x, y)) return 0;
+            if (bits->failed || !sane_number(x) || !sane_number(y) ||
+                    !polyline_add_point(entity, x, y)) return 0;
             for (index = 1u; index < vertices; ++index) {
                 x = bits_dd(bits, x);
                 y = bits_dd(bits, y);
-                if (bits->failed || !polyline_add_point(entity, x, y)) return 0;
+                if (bits->failed || !sane_number(x) || !sane_number(y) ||
+                    !polyline_add_point(entity, x, y)) return 0;
             }
         }
     }
@@ -782,14 +1332,20 @@ static DwgEntityDecoder decoder_for(uint16_t type)
 
 static int parse_entity_record(const uint8_t *data, size_t size,
                                const DwgRef *ref, QwCadDocument *document,
-                               int legacy)
+                               int legacy, int r2004)
 {
-    static const unsigned layouts[] = {
+    static const unsigned layouts_r2000[] = {
         DWG_HEAD_OBJ_SIZE | DWG_HEAD_PICTURE_RL | DWG_HEAD_LINEWEIGHT |
             DWG_HEAD_NOLINKS,
         DWG_HEAD_PICTURE_RL | DWG_HEAD_LINEWEIGHT | DWG_HEAD_NOLINKS,
         DWG_HEAD_OBJ_SIZE | DWG_HEAD_PICTURE_RL | DWG_HEAD_NOLINKS
     };
+    static const unsigned layouts_r2004[] = {
+        DWG_HEAD_OBJ_SIZE | DWG_HEAD_PICTURE_RL | DWG_HEAD_LINEWEIGHT,
+        DWG_HEAD_PICTURE_RL | DWG_HEAD_LINEWEIGHT,
+        DWG_HEAD_OBJ_SIZE | DWG_HEAD_PICTURE_RL
+    };
+    const unsigned *layouts = r2004 ? layouts_r2004 : layouts_r2000;
     DwgBits bits;
     uint64_t record_start;
     uint32_t record_size;
@@ -818,7 +1374,7 @@ static int parse_entity_record(const uint8_t *data, size_t size,
                     (unsigned long long)ref->handle, type);
         return 0;
     }
-    for (layout = 0u; layout < sizeof(layouts) / sizeof(layouts[0]); ++layout) {
+    for (layout = 0u; layout < 3u; ++layout) {
         DwgHead head;
         uint64_t data_start = 0u;
         size_t entity_count = document->entity_count;
@@ -854,6 +1410,102 @@ static int parse_entity_record(const uint8_t *data, size_t size,
     return 0;
 }
 
+static QwCadStatus parse_r2004_document(const uint8_t *bytes, size_t size,
+                                       QwCadDocument **out_document)
+{
+    uint64_t page_map_address = 0u;
+    uint32_t section_map_id = 0u;
+    DwgPageSlots slots;
+    DwgSections sections;
+    uint8_t *objects = NULL;
+    size_t objects_size = 0u;
+    uint8_t *handles = NULL;
+    size_t handles_size = 0u;
+    DwgRefs refs;
+    QwCadDocument *document;
+    size_t index;
+    const char *trace = getenv("QUIREWISE_CAD_DWG_TRACE");
+    memset(&slots, 0, sizeof(slots));
+    memset(&sections, 0, sizeof(sections));
+    memset(&refs, 0, sizeof(refs));
+    if (!r2004_header(bytes, size, &page_map_address, &section_map_id)) {
+        if (trace) fprintf(stderr, "R2004 header failed\n");
+        return QW_CAD_ERR_FORMAT;
+    }
+    if (trace) fprintf(stderr, "R2004 page_map=0x%llX map_id=%u\n",
+                       (unsigned long long)page_map_address, section_map_id);
+    if (!parse_page_map(bytes, size, page_map_address, &slots)) {
+        if (trace) fprintf(stderr, "R2004 page map failed\n");
+        free(slots.items);
+        return QW_CAD_ERR_FORMAT;
+    }
+    if (trace) fprintf(stderr, "R2004 pages=%zu\n", slots.count);
+    if (!parse_section_map(bytes, size, section_map_id, &slots, &sections)) {
+        if (trace) fprintf(stderr, "R2004 section map failed\n");
+        free(slots.items);
+        sections_free(&sections);
+        return QW_CAD_ERR_FORMAT;
+    }
+    if (trace) fprintf(stderr, "R2004 sections=%zu\n", sections.count);
+    objects = assemble_section(bytes, size, &sections, &slots,
+                               "AcDb:AcDbObjects", &objects_size);
+    handles = assemble_section(bytes, size, &sections, &slots,
+                               "AcDb:Handles", &handles_size);
+    free(slots.items);
+    sections_free(&sections);
+    if (!objects || !handles) {
+        if (trace) fprintf(stderr, "R2004 objects/handles section missing\n");
+        free(objects);
+        free(handles);
+        return QW_CAD_ERR_FORMAT;
+    }
+    if (trace) fprintf(stderr, "R2004 objects=%zu handles=%zu\n", objects_size,
+                       handles_size);
+    if (!parse_object_map(handles, handles_size, &refs)) {
+        if (trace) fprintf(stderr, "R2004 object map failed\n");
+        free(objects);
+        free(handles);
+        refs_free(&refs);
+        return QW_CAD_ERR_FORMAT;
+    }
+    if (trace) fprintf(stderr, "R2004 refs=%zu\n", refs.count);
+    free(handles);
+    document = (QwCadDocument *)calloc(1u, sizeof(*document));
+    if (!document) {
+        free(objects);
+        refs_free(&refs);
+        return QW_CAD_ERR_OUT_OF_MEMORY;
+    }
+    document->format = QW_CAD_FORMAT_DWG;
+    document->utf8_strings = 0;
+    qw_cad_document_layer_index(document, "0", 1);
+    if (document->layer_count > 0u)
+        document->layers[0].color = 0x00000000u;
+    if (trace) {
+        size_t debug_index;
+        fprintf(stderr, "DWG R2004 refs: %zu\n", refs.count);
+        for (debug_index = 0u; debug_index < refs.count; ++debug_index)
+            fprintf(stderr, "REF %llu %u\n",
+                    (unsigned long long)refs.items[debug_index].handle,
+                    refs.items[debug_index].offset);
+    }
+    for (index = 0u; index < refs.count; ++index) {
+        int before = (int)document->entity_count;
+        if (parse_entity_record(objects, objects_size, &refs.items[index],
+                                document, 0, 1)) {
+            if (trace)
+                fprintf(stderr, "DWG R2004 handle %llu -> entity %d\n",
+                        (unsigned long long)refs.items[index].handle,
+                        (int)document->entity_count - before);
+        }
+        if (document->entity_count >= DWG_MAX_OBJECTS) break;
+    }
+    refs_free(&refs);
+    free(objects);
+    qw_cad_document_compute_bounds(document);
+    *out_document = document;
+    return QW_CAD_OK;
+}
 QwCadStatus qw_cad_parse_dwg(const void *data, size_t size,
                              QwCadDocument **out_document)
 {
@@ -869,6 +1521,8 @@ QwCadStatus qw_cad_parse_dwg(const void *data, size_t size,
     *out_document = NULL;
     if (!bytes || size < 0x19u) return QW_CAD_ERR_INVALID_ARGUMENT;
     if (size > QW_CAD_MAX_INPUT) return QW_CAD_ERR_RESOURCE_LIMIT;
+    if (memcmp(bytes, "AC1018", 6u) == 0)
+        return parse_r2004_document(bytes, size, out_document);
     legacy = memcmp(bytes, "AC1014", 6u) == 0 ||
              memcmp(bytes, "AC1012", 6u) == 0;
     if (memcmp(bytes, "AC1015", 6u) != 0 && !legacy)
@@ -893,7 +1547,8 @@ QwCadStatus qw_cad_parse_dwg(const void *data, size_t size,
     if (trace) fprintf(stderr, "DWG refs: %zu\n", refs.count);
     for (index = 0u; index < refs.count; ++index) {
         int before = (int)document->entity_count;
-        if (parse_entity_record(bytes, size, &refs.items[index], document, legacy)) {
+        if (parse_entity_record(bytes, size, &refs.items[index], document,
+                                  legacy, 0)) {
             if (trace)
                 fprintf(stderr, "DWG handle %llu -> entity %d\n",
                         (unsigned long long)refs.items[index].handle,
@@ -906,6 +1561,14 @@ QwCadStatus qw_cad_parse_dwg(const void *data, size_t size,
     *out_document = document;
     return QW_CAD_OK;
 }
+
+
+
+
+
+
+
+
 
 
 

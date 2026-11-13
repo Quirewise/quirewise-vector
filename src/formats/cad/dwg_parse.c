@@ -185,6 +185,38 @@ static uint32_t bits_bl(DwgBits *bits)
     return 0u;
 }
 
+static uint32_t bits_umc(DwgBits *bits)
+{
+    uint32_t value = 0u;
+    unsigned shift;
+    for (shift = 0u; shift <= 28u; shift += 7u) {
+        uint8_t byte = bits_rc(bits);
+        value |= (uint32_t)(byte & 0x7Fu) << shift;
+        if ((byte & 0x80u) == 0u) return value;
+    }
+    return value;
+}
+static uint64_t bits_bll(DwgBits *bits)
+{
+    uint8_t length = (uint8_t)bits_read(bits, 3u);
+    uint64_t value = 0u;
+    unsigned index;
+    if (length == 0u) return 0u;
+    if (length == 1u) return bits_rc(bits);
+    if (length == 2u) return bits_rs(bits);
+    if (length == 4u) return bits_rl(bits);
+    for (index = 0u; index < length; ++index)
+        value |= (uint64_t)bits_rc(bits) << (8u * index);
+    return value;
+}
+
+static uint16_t bits_ot(DwgBits *bits)
+{
+    uint8_t opcode = (uint8_t)bits_read(bits, 2u);
+    if (opcode == 0u) return bits_rc(bits);
+    if (opcode == 1u) return (uint16_t)(bits_rc(bits) + 0x01F0u);
+    return bits_rs(bits);
+}
 static uint64_t bits_h(DwgBits *bits)
 {
     uint8_t byte = bits_rc(bits);
@@ -1428,6 +1460,9 @@ static void parse_color_head(DwgBits *bits, DwgHead *head)
 #define DWG_HEAD_NOLINKS 0x08u
 #define DWG_HEAD_MATERIAL 0x10u
 #define DWG_HEAD_SHADOW 0x20u
+#define DWG_HEAD_VISUAL 0x40u
+#define DWG_HEAD_DS 0x80u
+#define DWG_HEAD_PICTURE_BLL 0x100u
 
 static int parse_head(DwgBits *bits, uint64_t data_end, uint64_t expected_handle,
                       unsigned features, DwgHead *head, uint64_t *data_start)
@@ -1451,8 +1486,10 @@ static int parse_head(DwgBits *bits, uint64_t data_end, uint64_t expected_handle
         if (!bits_skip(bits, (uint64_t)eed_size * 8u)) return 0;
     }
     if (bits_read(bits, 1u)) {
-        uint32_t picture_size = bits_rl(bits);
-        if (!bits_skip(bits, (uint64_t)picture_size * 8u)) return 0;
+        uint64_t picture_size = (features & DWG_HEAD_PICTURE_BLL)
+                                    ? bits_bll(bits)
+                                    : (uint64_t)bits_rl(bits);
+        if (!bits_skip(bits, picture_size * 8u)) return 0;
     }
     head->mode = (uint8_t)bits_read(bits, 2u);
     head->reactors = bits_bl(bits);
@@ -1462,12 +1499,18 @@ static int parse_head(DwgBits *bits, uint64_t data_end, uint64_t expected_handle
     } else {
         head->xdic_missing = (int)bits_read(bits, 1u);
     }
+    if (features & DWG_HEAD_DS) (void)bits_read(bits, 1u);
     parse_color_head(bits, head);
     head->ltype_scale = bits_bd(bits);
     head->ltype_flags = (uint8_t)bits_read(bits, 2u);
     head->plotstyle_flags = (uint8_t)bits_read(bits, 2u);
     if (features & DWG_HEAD_MATERIAL) (void)bits_read(bits, 2u);
     if (features & DWG_HEAD_SHADOW) (void)bits_rc(bits);
+    if (features & DWG_HEAD_VISUAL) {
+        (void)bits_read(bits, 1u);
+        (void)bits_read(bits, 1u);
+        (void)bits_read(bits, 1u);
+    }
     head->invisible = (int16_t)bits_bs(bits);
     if (features & DWG_HEAD_LINEWEIGHT) (void)bits_rc(bits);
     *data_start = bits->bit;
@@ -1855,6 +1898,21 @@ static int parse_entity_record(const uint8_t *data, size_t size,
         DWG_HEAD_PICTURE_RL | DWG_HEAD_LINEWEIGHT,
         DWG_HEAD_OBJ_SIZE | DWG_HEAD_PICTURE_RL
     };
+    static const unsigned layouts_r2010[] = {
+        DWG_HEAD_PICTURE_BLL | DWG_HEAD_MATERIAL | DWG_HEAD_SHADOW |
+            DWG_HEAD_VISUAL | DWG_HEAD_LINEWEIGHT,
+        DWG_HEAD_PICTURE_BLL | DWG_HEAD_MATERIAL | DWG_HEAD_VISUAL |
+            DWG_HEAD_LINEWEIGHT,
+        DWG_HEAD_PICTURE_BLL | DWG_HEAD_MATERIAL | DWG_HEAD_VISUAL
+    };
+    static const unsigned layouts_r2013[] = {
+        DWG_HEAD_PICTURE_BLL | DWG_HEAD_MATERIAL | DWG_HEAD_SHADOW |
+            DWG_HEAD_VISUAL | DWG_HEAD_DS | DWG_HEAD_LINEWEIGHT,
+        DWG_HEAD_PICTURE_BLL | DWG_HEAD_MATERIAL | DWG_HEAD_VISUAL |
+            DWG_HEAD_DS | DWG_HEAD_LINEWEIGHT,
+        DWG_HEAD_PICTURE_BLL | DWG_HEAD_MATERIAL | DWG_HEAD_VISUAL |
+            DWG_HEAD_DS
+    };
     static const unsigned layouts_r2007[] = {
         DWG_HEAD_OBJ_SIZE | DWG_HEAD_PICTURE_RL | DWG_HEAD_MATERIAL |
             DWG_HEAD_SHADOW | DWG_HEAD_LINEWEIGHT,
@@ -1862,10 +1920,12 @@ static int parse_entity_record(const uint8_t *data, size_t size,
             DWG_HEAD_LINEWEIGHT,
         DWG_HEAD_OBJ_SIZE | DWG_HEAD_PICTURE_RL | DWG_HEAD_MATERIAL
     };
-    const unsigned *layouts = version == 2 ? layouts_r2007
+    const unsigned *layouts = version >= 4 ? layouts_r2013
+                               : version == 3 ? layouts_r2010
+                               : version == 2 ? layouts_r2007
                                : version == 1 ? layouts_r2004
                                               : layouts_r2000;
-    const unsigned layout_count = version == 2 ? 3u : 3u;
+    const unsigned layout_count = 3u;
     DwgBits bits;
     uint64_t record_start;
     uint32_t record_size;
@@ -1885,10 +1945,21 @@ static int parse_entity_record(const uint8_t *data, size_t size,
     if (data_end > bits.size_bits) return 0;
     bits.limit = data_end;
     bits_set(&bits, body_start);
-    type = bits_bs(&bits);
-    if (bits.failed) return 0;
+    if (version >= 3) {
+        uint64_t field_start = bits.bit;
+        uint32_t handle_stream_bits = bits_umc(&bits);
+        uint64_t field_bits = bits.bit - field_start;
+        type = bits_ot(&bits);
+        data_end = body_start + field_bits + (uint64_t)record_size * 8u -
+                   handle_stream_bits;
+        if (data_end < body_start || data_end > bits.size_bits) return 0;
+        bits.limit = data_end;
+    } else {
+        type = bits_bs(&bits);
+        if (bits.failed) return 0;
+    }
     decoder = decoder_for(type);
-    if (version == 2 && type == 0x01) decoder = NULL;
+    if (version >= 2 && type == 0x01) decoder = NULL;
     if (!decoder) {
         if (getenv("QUIREWISE_CAD_DWG_TRACE"))
             fprintf(stderr, "DWG handle %llu type 0x%X unsupported\n",
@@ -1902,7 +1973,10 @@ static int parse_entity_record(const uint8_t *data, size_t size,
         bits_set(&bits, body_start);
         bits.limit = data_end;
         bits.failed = 0;
-        if (bits_bs(&bits) != type) continue;
+        if (version >= 3) {
+            (void)bits_umc(&bits);
+            if (bits_ot(&bits) != type) continue;
+        } else if (bits_bs(&bits) != type) continue;
         if (legacy) {
             if (!parse_head_r14(&bits, data_end, ref->handle, &head,
                                 &data_start))
@@ -1932,7 +2006,8 @@ static int parse_entity_record(const uint8_t *data, size_t size,
 }
 
 static QwCadStatus parse_r2004_document(const uint8_t *bytes, size_t size,
-                                       QwCadDocument **out_document)
+                                       QwCadDocument **out_document,
+                                       int version)
 {
     uint64_t page_map_address = 0u;
     uint32_t section_map_id = 0u;
@@ -2013,7 +2088,7 @@ static QwCadStatus parse_r2004_document(const uint8_t *bytes, size_t size,
     for (index = 0u; index < refs.count; ++index) {
         int before = (int)document->entity_count;
         if (parse_entity_record(objects, objects_size, &refs.items[index],
-                                document, 0, 1)) {
+                                document, 0, version)) {
             if (trace)
                 fprintf(stderr, "DWG R2004 handle %llu -> entity %d\n",
                         (unsigned long long)refs.items[index].handle,
@@ -2095,9 +2170,14 @@ QwCadStatus qw_cad_parse_dwg(const void *data, size_t size,
     if (!bytes || size < 0x19u) return QW_CAD_ERR_INVALID_ARGUMENT;
     if (size > QW_CAD_MAX_INPUT) return QW_CAD_ERR_RESOURCE_LIMIT;
     if (memcmp(bytes, "AC1018", 6u) == 0)
-        return parse_r2004_document(bytes, size, out_document);
+        return parse_r2004_document(bytes, size, out_document, 1);
     if (memcmp(bytes, "AC1021", 6u) == 0)
         return parse_r2007_document(bytes, size, out_document);
+    if (memcmp(bytes, "AC1024", 6u) == 0)
+        return parse_r2004_document(bytes, size, out_document, 3);
+    if (memcmp(bytes, "AC1027", 6u) == 0 ||
+        memcmp(bytes, "AC1032", 6u) == 0)
+        return parse_r2004_document(bytes, size, out_document, 4);
     legacy = memcmp(bytes, "AC1014", 6u) == 0 ||
              memcmp(bytes, "AC1012", 6u) == 0;
     if (memcmp(bytes, "AC1015", 6u) != 0 && !legacy)
@@ -2136,6 +2216,12 @@ QwCadStatus qw_cad_parse_dwg(const void *data, size_t size,
     *out_document = document;
     return QW_CAD_OK;
 }
+
+
+
+
+
+
 
 
 

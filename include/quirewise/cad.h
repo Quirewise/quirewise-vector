@@ -66,10 +66,9 @@ uint32_t qw_cad_abi_version(void);
 /* Returns 1 when the bytes look like DXF (ASCII or binary) or DWG. */
 int qw_cad_probe(const void *data, size_t size);
 
-/* Parses DXF (ASCII or binary) and DWG R13/R14/R2000/R2004/R2007
- * (AC1012/AC1014/AC1015/AC1018/AC1021, LINE/CIRCLE/ARC/LWPOLYLINE and TEXT
- * up to R2004 in this release). DWG R2010+ is recognised by qw_cad_probe()
- * but returns QW_CAD_ERR_UNSUPPORTED. */
+/* Parses DXF (ASCII or binary) and DWG R13/R14/R2000/R2004/R2007/R2010/
+ * R2013/R2018 (AC1012/AC1014/AC1015/AC1018/AC1021/AC1024/AC1027/AC1032,
+ * LINE/CIRCLE/ARC/LWPOLYLINE and TEXT up to R2004 in this release). */
 QwCadStatus qw_cad_parse(const void *data, size_t size,
                          QwCadDocument **out_document);
 QwCadFormat qw_cad_format(const QwCadDocument *document);

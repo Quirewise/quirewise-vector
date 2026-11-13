@@ -1,4 +1,4 @@
-﻿#include "formats/cad/cad_internal.h"
+#include "formats/cad/cad_internal.h"
 
 #include <quirewise/charset.h>
 
@@ -913,7 +913,11 @@ static int parse_hatch_entity(QwCadParser *parser, QwCadEntity *parsed)
                 pair_double(&pair);
         }
     }
-    if (!solid || parsed->point_count < 3u) return 1;
+    if (!solid || parsed->point_count < 3u) {
+        parsed->kind = QW_CAD_ENTITY_POLYLINE;
+        parsed->closed = 1;
+        return 1;
+    }
     if (parsed->point_count > 4u) {
         QwCadPoint first = parsed->points[0];
         QwCadPoint last = parsed->points[parsed->point_count - 1u];

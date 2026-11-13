@@ -59,6 +59,8 @@ if(BUILD_TESTING)
 
     add_executable(quirewise_vector_cad_test tests/cad_dxf_test.c)
     target_compile_features(quirewise_vector_cad_test PRIVATE c_std_11)
+    target_compile_definitions(quirewise_vector_cad_test PRIVATE
+        QW_CAD_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
     target_link_libraries(quirewise_vector_cad_test PRIVATE Quirewise::Vector)
     add_test(NAME quirewise_vector_cad_test COMMAND quirewise_vector_cad_test)
 endif()

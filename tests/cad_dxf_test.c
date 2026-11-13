@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef QW_CAD_TEST_DATA_DIR
+#define QW_CAD_TEST_DATA_DIR "."
+#endif
+
 static const char kAsciiDxf[] =
     "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1015\n9\n$DWGCODEPAGE\n3\n"
     "ANSI_1252\n0\nENDSEC\n"
@@ -65,6 +69,74 @@ static int check(int condition, const char *message)
 {
     if (!condition) fprintf(stderr, "FAIL: %s\n", message);
     return condition ? 1 : 0;
+}
+
+static unsigned char *load_file(const char *path, size_t *out_size)
+{
+    FILE *file = fopen(path, "rb");
+    long length;
+    unsigned char *data;
+    if (!file) return NULL;
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    length = ftell(file);
+    if (length <= 0 || fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    data = (unsigned char *)malloc((size_t)length);
+    if (!data) {
+        fclose(file);
+        return NULL;
+    }
+    if (fread(data, 1u, (size_t)length, file) != (size_t)length) {
+        free(data);
+        fclose(file);
+        return NULL;
+    }
+    fclose(file);
+    *out_size = (size_t)length;
+    return data;
+}
+
+static int check_dwg(const char *path, QwCadStatus expected,
+                     size_t expected_entities, double min_x, double min_y,
+                     double max_x, double max_y)
+{
+    size_t size = 0u;
+    unsigned char *data;
+    QwCadDocument *document = NULL;
+    QwCadBounds bounds;
+    QwCadStatus status;
+    QwCadImage image;
+    int ok = 1;
+    char full[512];
+    snprintf(full, sizeof(full), "%s/%s", QW_CAD_TEST_DATA_DIR, path);
+    data = load_file(full, &size);
+    if (!data) return check(0, path);
+    status = qw_cad_parse(data, size, &document);
+    ok &= check(status == expected, path);
+    if (status == QW_CAD_OK && document) {
+        ok &= check(qw_cad_format(document) == QW_CAD_FORMAT_DWG, path);
+        ok &= check(qw_cad_entity_count(document) == expected_entities, path);
+        ok &= check(qw_cad_bounds(document, &bounds) == QW_CAD_OK, path);
+        if (expected == QW_CAD_OK) {
+            ok &= check(fabs(bounds.min_x - min_x) < 1e-6 &&
+                            fabs(bounds.min_y - min_y) < 1e-6 &&
+                            fabs(bounds.max_x - max_x) < 1e-6 &&
+                            fabs(bounds.max_y - max_y) < 1e-6,
+                        path);
+        }
+        memset(&image, 0, sizeof(image));
+        ok &= check(qw_cad_render_rgba(document, 128u, &image) == QW_CAD_OK,
+                    path);
+        qw_cad_image_free(&image);
+    }
+    qw_cad_document_free(document);
+    free(data);
+    return ok;
 }
 
 int main(void)
@@ -138,9 +210,14 @@ int main(void)
         qw_cad_document_free(document);
     }
     ok &= check(qw_cad_probe("AC1015", 6u) == 1, "DWG probe");
-    ok &= check(qw_cad_parse("AC1015", 6u, &document) ==
-                    QW_CAD_ERR_UNSUPPORTED,
-                "DWG explicit unsupported");
+    {
+        unsigned char unsupported[0x19];
+        memset(unsupported, 0, sizeof(unsupported));
+        memcpy(unsupported, "AC1018", 6u);
+        ok &= check(qw_cad_parse(unsupported, sizeof(unsupported), &document) ==
+                        QW_CAD_ERR_UNSUPPORTED,
+                    "DWG explicit unsupported");
+    }
     {
         size_t cut;
         unsigned char random_bytes[128];
@@ -155,8 +232,54 @@ int main(void)
         (void)qw_cad_parse(random_bytes, sizeof(random_bytes), &document);
         qw_cad_document_free(document);
     }
+    ok &= check_dwg("line_2000.dwg", QW_CAD_OK, 1u, 50.0, 50.0, 100.0,
+                         100.0);
+    ok &= check_dwg("line_R14.dwg", QW_CAD_OK, 1u, 50.0, 50.0, 100.0,
+                         100.0);
+    ok &= check_dwg("circle_R14.dwg", QW_CAD_OK, 1u, 0.0, 0.0, 100.0, 100.0);
+    ok &= check_dwg("arc_R14.dwg", QW_CAD_OK, 1u, 50.0, 50.0, 100.0, 75.0);
+    ok &= check_dwg("lw_entities-2d.dwg", QW_CAD_OK, 9u, 0.0, 0.0, 8.1272793,
+                    9.1272793);
+    {
+        size_t size = 0u;
+        unsigned char *data = load_file(
+            QW_CAD_TEST_DATA_DIR "/lw_entities-2d.dwg", &size);
+        if (data) {
+            QwCadDocument *drawing = NULL;
+            QwCadTextInfo info;
+            if (qw_cad_parse(data, size, &drawing) == QW_CAD_OK && drawing) {
+                ok &= check(qw_cad_text_count(drawing) == 1u, "DWG text count");
+                if (qw_cad_text_at(drawing, 0u, &info) == QW_CAD_OK) {
+                    ok &= check(info.text_size == 3u &&
+                                    memcmp(info.text, "FOO", 3u) == 0,
+                                "DWG text value");
+                    ok &= check(fabs(info.height - 0.75) < 1e-6,
+                                "DWG text height");
+                }
+            }
+            qw_cad_document_free(drawing);
+            free(data);
+        }
+    }
+    ok &= check_dwg("circle_2004.dwg", QW_CAD_ERR_UNSUPPORTED, 0u, 0.0, 0.0,
+                    0.0, 0.0);
+    {
+        size_t size = 0u;
+        unsigned char *data =
+            load_file(QW_CAD_TEST_DATA_DIR "/line_2000.dwg", &size);
+        if (data) {
+            size_t cut;
+            for (cut = 0u; cut < size; cut += 4096u) {
+                QwCadDocument *drawing = NULL;
+                (void)qw_cad_parse(data, cut, &drawing);
+                qw_cad_document_free(drawing);
+            }
+            free(data);
+        }
+    }
     if (!ok) return 1;
     printf("cad dxf tests passed\n");
     return 0;
 }
+
 

@@ -83,6 +83,9 @@ struct QwCadDocument {
 
 typedef struct QwCadParser QwCadParser;
 
+QwCadStatus qw_cad_parse_dwg(const void *data, size_t size,
+                             QwCadDocument **out_document);
+
 QwCadEntity *qw_cad_document_add_entity(QwCadDocument *document);
 QwCadBlock *qw_cad_document_add_block(QwCadDocument *document, const char *name);
 QwCadBlock *qw_cad_document_find_block(QwCadDocument *document, const char *name);

@@ -16,9 +16,12 @@ CMake target: `Quirewise::Vector`. Public headers are under
   transforms, POINT, SOLID/TRACE/3DFACE, LEADER and block-carried DIMENSION).
   It exposes bounds, a text inventory and two renderers: RGBA8 raster and SVG
   with real `<text>` elements.
-- DWG: version detection only; decoding is explicitly `UNSUPPORTED` in this
-  release. The CAD capability is modelled on `unitedrhino/go-cad` (Apache-2.0)
-  but contains no Go or third-party CAD code.
+- DWG: R13/R14/R2000 (AC1012/AC1014/AC1015) segment directory, object map,
+  object records, common entity head and LINE/CIRCLE/ARC/LWPOLYLINE/TEXT
+  geometry and text.
+  R2004+ is version-detected only and returns `UNSUPPORTED`. The implementation
+  is modelled on `unitedrhino/go-cad` (Apache-2.0) but contains no Go or
+  third-party CAD code.
 
 ## Boundaries
 

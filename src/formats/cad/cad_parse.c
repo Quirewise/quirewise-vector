@@ -1343,10 +1343,8 @@ QwCadStatus qw_cad_parse(const void *data, size_t size,
     *out_document = NULL;
     if (!bytes || size < 4u) return QW_CAD_ERR_INVALID_ARGUMENT;
     if (size > QW_CAD_MAX_INPUT) return QW_CAD_ERR_RESOURCE_LIMIT;
-    if (size >= 4u && memcmp(bytes, "AC10", 4u) == 0) {
-        /* DWG is a future decoder. Keep the failure stable and explicit. */
-        return QW_CAD_ERR_UNSUPPORTED;
-    }
+    if (size >= 4u && memcmp(bytes, "AC10", 4u) == 0)
+        return qw_cad_parse_dwg(bytes, size, out_document);
     document = (QwCadDocument *)calloc(1u, sizeof(*document));
     if (!document) return QW_CAD_ERR_OUT_OF_MEMORY;
     document_init(document);

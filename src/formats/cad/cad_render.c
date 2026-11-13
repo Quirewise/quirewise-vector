@@ -689,17 +689,67 @@ static void svg_entity(SvgBuffer *buffer, const QwCadEntity *entity,
             }
             svg_printf(buffer, "\" fill=\"none\" stroke=\"%s\"/>", hex);
         } else {
-            svg_append(buffer, "<polyline points=\"");
-            for (index = 0u; index < entity->point_count; ++index)
-                svg_printf(buffer, "%.6f,%.6f ", entity->points[index].x,
-                           entity->points[index].y);
-            if (entity->closed && entity->point_count > 0u)
-                svg_printf(buffer, "%.6f,%.6f", entity->points[0].x,
-                           entity->points[0].y);
-            svg_printf(buffer,
-                       "\" fill=\"none\" stroke=\"%s\" "
-                       "vector-effect=\"non-scaling-stroke\"/>",
-                       hex);
+            int has_bulge = 0;
+            if (entity->bulges) {
+                for (index = 0u; index + 1u < entity->point_count; ++index) {
+                    if (fabs(entity->bulges[index]) > 1e-9) {
+                        has_bulge = 1;
+                        break;
+                    }
+                }
+            }
+            if (has_bulge) {
+                svg_printf(buffer, "<path d=\"M %.6f,%.6f ",
+                           entity->points[0].x, entity->points[0].y);
+                for (index = 1u; index < entity->point_count; ++index) {
+                    double bulge = entity->bulges[index - 1u];
+                    QwCadPoint a = entity->points[index - 1u];
+                    QwCadPoint b = entity->points[index];
+                    double dx = b.x - a.x;
+                    double dy = b.y - a.y;
+                    double chord = hypot(dx, dy);
+                    double theta = 4.0 * atan(bulge);
+                    if (fabs(bulge) < 1e-9 || chord < 1e-12 ||
+                        fabs(sin(theta / 2.0)) < 1e-12) {
+                        svg_printf(buffer, "L %.6f,%.6f ", b.x, b.y);
+                    } else {
+                        double radius = chord / (2.0 * sin(theta / 2.0));
+                        double nx = -dy / chord;
+                        double ny = dx / chord;
+                        double cx = (a.x + b.x) / 2.0 +
+                                    nx * (chord / 2.0) / tan(theta / 2.0);
+                        double cy = (a.y + b.y) / 2.0 +
+                                    ny * (chord / 2.0) / tan(theta / 2.0);
+                        double start = atan2(a.y - cy, a.x - cx);
+                        int segment;
+                        for (segment = 1; segment <= 16; ++segment) {
+                            double angle = start + theta *
+                                                       (double)segment / 16.0;
+                            svg_printf(buffer, "L %.6f,%.6f ",
+                                       cx + fabs(radius) * cos(angle),
+                                       cy + fabs(radius) * sin(angle));
+                        }
+                    }
+                }
+                if (entity->closed && entity->point_count > 0u)
+                    svg_append(buffer, "Z ");
+                svg_printf(buffer,
+                           "\" fill=\"none\" stroke=\"%s\" "
+                           "vector-effect=\"non-scaling-stroke\"/>",
+                           hex);
+            } else {
+                svg_append(buffer, "<polyline points=\"");
+                for (index = 0u; index < entity->point_count; ++index)
+                    svg_printf(buffer, "%.6f,%.6f ", entity->points[index].x,
+                               entity->points[index].y);
+                if (entity->closed && entity->point_count > 0u)
+                    svg_printf(buffer, "%.6f,%.6f", entity->points[0].x,
+                               entity->points[0].y);
+                svg_printf(buffer,
+                           "\" fill=\"none\" stroke=\"%s\" "
+                           "vector-effect=\"non-scaling-stroke\"/>",
+                           hex);
+            }
         }
     } else if (entity->kind == QW_CAD_ENTITY_SOLID) {
         svg_printf(buffer, "<polygon points=\"%.6f,%.6f %.6f,%.6f %.6f,%.6f "
@@ -796,6 +846,7 @@ void qw_cad_image_free(QwCadImage *image)
     free(image->pixels);
     memset(image, 0, sizeof(*image));
 }
+
 
 
 

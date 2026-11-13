@@ -1,4 +1,4 @@
-#include "formats/cad/cad_internal.h"
+﻿#include "formats/cad/cad_internal.h"
 
 #include <quirewise/charset.h>
 
@@ -939,6 +939,7 @@ static int parse_hatch_entity(QwCadParser *parser, QwCadEntity *parsed)
     } else {
         parsed->kind = QW_CAD_ENTITY_POLYLINE;
         parsed->closed = 1;
+        parsed->filled = 1;
     }
     return 1;
 }
@@ -1523,6 +1524,7 @@ void qw_cad_buffer_free(void *buffer)
 {
     free(buffer);
 }
+
 
 
 

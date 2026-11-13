@@ -18,6 +18,9 @@ endif()
 if(NOT TARGET Quirewise::Compression)
     find_package(QuirewiseCompression CONFIG REQUIRED)
 endif()
+if(NOT TARGET Quirewise::Charset)
+    find_package(QuirewiseCharset CONFIG REQUIRED)
+endif()
 file(GLOB_RECURSE QW_SOURCES CONFIGURE_DEPENDS src/*.c src/*.cpp)
 add_library(quirewise_vector ${QW_LIBRARY_TYPE} ${QW_SOURCES})
 add_library(Quirewise::Vector ALIAS quirewise_vector)
@@ -28,7 +31,7 @@ target_include_directories(quirewise_vector PUBLIC
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/core ${CMAKE_CURRENT_SOURCE_DIR}/src/formats ${CMAKE_CURRENT_SOURCE_DIR}/src/backends)
 target_link_libraries(quirewise_vector PRIVATE
-    Quirewise::Data Quirewise::Compression
+    Quirewise::Data Quirewise::Compression Quirewise::Charset
     "$<$<NOT:$<PLATFORM_ID:Windows>>:m>")
 install(TARGETS quirewise_vector EXPORT QuirewiseVectorTargets
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
@@ -53,5 +56,10 @@ if(BUILD_TESTING)
     target_link_libraries(quirewise_vector_fuzz_smoke PRIVATE Quirewise::Vector)
     add_test(NAME quirewise_vector_fuzz_smoke
         COMMAND quirewise_vector_fuzz_smoke)
+
+    add_executable(quirewise_vector_cad_test tests/cad_dxf_test.c)
+    target_compile_features(quirewise_vector_cad_test PRIVATE c_std_11)
+    target_link_libraries(quirewise_vector_cad_test PRIVATE Quirewise::Vector)
+    add_test(NAME quirewise_vector_cad_test COMMAND quirewise_vector_cad_test)
 endif()
 target_link_libraries(quirewise_vector PUBLIC Quirewise::Runtime)

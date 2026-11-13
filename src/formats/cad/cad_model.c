@@ -1,4 +1,4 @@
-#include "formats/cad/cad_internal.h"
+﻿#include "formats/cad/cad_internal.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -12,6 +12,7 @@ void qw_cad_entity_release(QwCadEntity *entity)
 {
     if (!entity) return;
     free(entity->points);
+    free(entity->contour_starts);
     free(entity->text);
     free(entity->block_name);
     memset(entity, 0, sizeof(*entity));
@@ -262,6 +263,8 @@ static int expand_entity(QwCadDocument *document, const QwCadEntity *source,
                              capacity);
     copy = *source;
     copy.points = NULL;
+    copy.contour_starts = NULL;
+    copy.contour_count = 0u;
     copy.text = NULL;
     copy.block_name = NULL;
     copy.point_count = 0u;
@@ -277,6 +280,17 @@ static int expand_entity(QwCadDocument *document, const QwCadEntity *source,
         for (index = 0u; index < copy.point_count; ++index)
             transform_point(&transform, &copy.points[index].x,
                             &copy.points[index].y);
+    }
+    if (source->contour_count) {
+        copy.contour_starts =
+            (size_t *)malloc(source->contour_count * sizeof(*copy.contour_starts));
+        if (!copy.contour_starts) {
+            free(copy.points);
+            return 0;
+        }
+        memcpy(copy.contour_starts, source->contour_starts,
+               source->contour_count * sizeof(*copy.contour_starts));
+        copy.contour_count = source->contour_count;
     }
     for (index = 0u; index < 4u; ++index)
         transform_point(&transform, &copy.p[index].x, &copy.p[index].y);
@@ -343,3 +357,7 @@ void qw_cad_document_expand_inserts(QwCadDocument *document)
         block->entity_capacity = 0u;
     }
 }
+
+
+
+

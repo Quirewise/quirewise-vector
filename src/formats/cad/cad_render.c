@@ -266,9 +266,10 @@ static void fill_polygon(QwCadImage *image, const QwCadPoint *points,
 }
 
 static void fill_polygon_generic(QwCadImage *image, const QwCadPoint *points,
-                                 size_t count, double scale, double min_x,
-                                 double min_y, double top, double margin,
-                                 uint32_t color)
+                                 size_t count, const size_t *contours,
+                                 size_t contour_count, double scale,
+                                 double min_x, double min_y, double top,
+                                 double margin, uint32_t color)
 {
     double *xs;
     int min_y_px = 32767;
@@ -289,17 +290,32 @@ static void fill_polygon_generic(QwCadImage *image, const QwCadPoint *points,
     for (y = min_y_px; y <= max_y_px; ++y) {
         size_t intersections = 0u;
         size_t left_index;
-        for (index = 0u; index < count; ++index) {
-            const QwCadPoint *a = &points[index];
-            const QwCadPoint *b = &points[(index + 1u) % count];
-            double ay = top - (margin + (a->y - min_y) * scale);
-            double by = top - (margin + (b->y - min_y) * scale);
-            if ((ay <= (double)y && by > (double)y) ||
-                (by <= (double)y && ay > (double)y)) {
-                double t = ((double)y - ay) / (by - ay);
-                double ax = margin + (a->x - min_x) * scale;
-                double bx = margin + (b->x - min_x) * scale;
-                xs[intersections++] = ax + t * (bx - ax);
+        size_t contour;
+        for (contour = 0u; contour < (contour_count ? contour_count : 1u);
+             ++contour) {
+            size_t contour_start =
+                contour_count ? contours[contour] : 0u;
+            size_t contour_end = contour_count
+                                     ? (contour + 1u < contour_count
+                                            ? contours[contour + 1u]
+                                            : count)
+                                     : count;
+            size_t contour_length =
+                contour_end > contour_start ? contour_end - contour_start : 0u;
+            for (index = 0u; index < contour_length; ++index) {
+                const QwCadPoint *a = &points[contour_start + index];
+                const QwCadPoint *b =
+                    &points[contour_start +
+                            ((index + 1u) % contour_length)];
+                double ay = top - (margin + (a->y - min_y) * scale);
+                double by = top - (margin + (b->y - min_y) * scale);
+                if ((ay <= (double)y && by > (double)y) ||
+                    (by <= (double)y && ay > (double)y)) {
+                    double t = ((double)y - ay) / (by - ay);
+                    double ax = margin + (a->x - min_x) * scale;
+                    double bx = margin + (b->x - min_x) * scale;
+                    xs[intersections++] = ax + t * (bx - ax);
+                }
             }
         }
         for (left_index = 0u; left_index + 1u < intersections; ++left_index) {
@@ -431,9 +447,11 @@ QwCadStatus qw_cad_render_rgba(const QwCadDocument *document, uint32_t width,
             size_t point;
             if (entity->filled && entity->point_count >= 3u) {
                 fill_polygon_generic(&image, entity->points,
-                                     entity->point_count, scale, bounds.min_x,
-                                     bounds.min_y, (double)height, margin,
-                                     color);
+                                     entity->point_count,
+                                     entity->contour_starts,
+                                     entity->contour_count, scale,
+                                     bounds.min_x, bounds.min_y,
+                                     (double)height, margin, color);
             }
             if (entity->point_count == 1u) {
                 double x = margin +
@@ -559,11 +577,37 @@ static void svg_entity(SvgBuffer *buffer, const QwCadEntity *entity,
     } else if (entity->kind == QW_CAD_ENTITY_POLYLINE ||
                entity->kind == QW_CAD_ENTITY_SPLINE) {
         if (entity->filled && entity->closed && entity->point_count >= 3u) {
-            svg_append(buffer, "<polygon points=\"");
-            for (index = 0u; index < entity->point_count; ++index)
-                svg_printf(buffer, "%.6f,%.6f ", entity->points[index].x,
-                           entity->points[index].y);
-            svg_printf(buffer, "\" fill=\"%s\" stroke=\"%s\"/>", hex, hex);
+            if (entity->contour_count > 1u) {
+                size_t contour;
+                svg_append(buffer, "<path d=\"");
+                for (contour = 0u; contour < entity->contour_count;
+                     ++contour) {
+                    size_t start = entity->contour_starts[contour];
+                    size_t end = contour + 1u < entity->contour_count
+                                     ? entity->contour_starts[contour + 1u]
+                                     : entity->point_count;
+                    size_t point;
+                    if (end <= start) continue;
+                    svg_printf(buffer, "M %.6f,%.6f ",
+                               entity->points[start].x,
+                               entity->points[start].y);
+                    for (point = start + 1u; point < end; ++point)
+                        svg_printf(buffer, "L %.6f,%.6f ",
+                                   entity->points[point].x,
+                                   entity->points[point].y);
+                    svg_append(buffer, "Z ");
+                }
+                svg_printf(buffer,
+                           "\" fill=\"%s\" fill-rule=\"evenodd\" stroke=\"%s\"/>",
+                           hex, hex);
+            } else {
+                svg_append(buffer, "<polygon points=\"");
+                for (index = 0u; index < entity->point_count; ++index)
+                    svg_printf(buffer, "%.6f,%.6f ", entity->points[index].x,
+                               entity->points[index].y);
+                svg_printf(buffer, "\" fill=\"%s\" stroke=\"%s\"/>", hex,
+                           hex);
+            }
         } else {
             svg_append(buffer, "<polyline points=\"");
             for (index = 0u; index < entity->point_count; ++index)
@@ -672,6 +716,8 @@ void qw_cad_image_free(QwCadImage *image)
     free(image->pixels);
     memset(image, 0, sizeof(*image));
 }
+
+
 
 
 

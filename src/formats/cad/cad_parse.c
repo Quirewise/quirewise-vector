@@ -520,6 +520,7 @@ char *qw_cad_text_utf8(const QwCadDocument *document, const char *input,
 static void entity_clear(QwCadEntity *entity)
 {
     free(entity->points);
+    free(entity->contour_starts);
     free(entity->text);
     free(entity->block_name);
     memset(entity, 0, sizeof(*entity));
@@ -889,10 +890,24 @@ static int skip_until_zero(QwCadParser *parser)
     }
 }
 
+static int entity_add_contour(QwCadEntity *entity, size_t start)
+{
+    size_t *grown = (size_t *)realloc(
+        entity->contour_starts,
+        (entity->contour_count + 1u) * sizeof(*grown));
+    if (!grown) return 0;
+    entity->contour_starts = grown;
+    entity->contour_starts[entity->contour_count++] = start;
+    return 1;
+}
+
 static int parse_hatch_entity(QwCadParser *parser, QwCadEntity *parsed)
 {
     DxfPair pair;
     int solid = 0;
+    int path_count = 0;
+    int expect_paths = 0;
+    int in_path = 1;
     for (;;) {
         if (!dxf_next(&parser->lexer, &pair)) return 0;
         if (pair.code == 0) {
@@ -906,31 +921,42 @@ static int parse_hatch_entity(QwCadParser *parser, QwCadEntity *parsed)
             set_entity_color(parsed, &pair);
         } else if (pair.code == 70) {
             solid = pair_double(&pair) != 0.0;
-        } else if (pair.code == 10) {
-            entity_add_point(parsed, (QwCadPoint){pair_double(&pair), 0.0});
-        } else if (pair.code == 20 && parsed->point_count > 0u) {
+        } else if (pair.code == 91) {
+            expect_paths = (int)pair_double(&pair);
+            if (expect_paths < 0 || expect_paths > 10000) expect_paths = 0;
+        } else if (pair.code == 92) {
+            if (expect_paths == 0 || path_count < expect_paths) {
+                if (!entity_add_contour(parsed, parsed->point_count)) return 0;
+                ++path_count;
+                in_path = 1;
+            }
+        } else if (pair.code == 75 || pair.code == 76 || pair.code == 52 ||
+                   pair.code == 78 || pair.code == 47) {
+            in_path = 0;
+        } else if (pair.code == 10 && in_path) {
+            if (!entity_add_point(parsed,
+                                  (QwCadPoint){pair_double(&pair), 0.0}))
+                return 0;
+        } else if (pair.code == 20 && in_path && parsed->point_count > 0u) {
             parsed->points[parsed->point_count - 1u].y =
                 pair_double(&pair);
         }
+    }
+    if (parsed->contour_count == 0u && parsed->point_count >= 3u) {
+        if (!entity_add_contour(parsed, 0u)) return 0;
     }
     if (!solid || parsed->point_count < 3u) {
         parsed->kind = QW_CAD_ENTITY_POLYLINE;
         parsed->closed = 1;
         return 1;
     }
-    if (parsed->point_count > 4u) {
-        QwCadPoint first = parsed->points[0];
-        QwCadPoint last = parsed->points[parsed->point_count - 1u];
-        if (fabs(first.x - last.x) < 1e-9 && fabs(first.y - last.y) < 1e-9)
-            --parsed->point_count;
-    }
-    if (parsed->point_count == 4u) {
+    if (parsed->contour_count == 1u && parsed->point_count == 4u) {
         parsed->kind = QW_CAD_ENTITY_SOLID;
         parsed->p[0] = parsed->points[0];
         parsed->p[1] = parsed->points[1];
         parsed->p[2] = parsed->points[2];
         parsed->p[3] = parsed->points[3];
-    } else if (parsed->point_count == 3u) {
+    } else if (parsed->contour_count == 1u && parsed->point_count == 3u) {
         parsed->kind = QW_CAD_ENTITY_SOLID;
         parsed->p[0] = parsed->points[0];
         parsed->p[1] = parsed->points[1];
@@ -942,8 +968,7 @@ static int parse_hatch_entity(QwCadParser *parser, QwCadEntity *parsed)
         parsed->filled = 1;
     }
     return 1;
-}
-static int parse_entity(QwCadParser *parser, const char *type, QwCadEntity **out_list, size_t *out_count, size_t *out_capacity)
+}static int parse_entity(QwCadParser *parser, const char *type, QwCadEntity **out_list, size_t *out_count, size_t *out_capacity)
 {
     QwCadEntity parsed;
     QwCadEntity *entity = &parsed;
@@ -1524,6 +1549,9 @@ void qw_cad_buffer_free(void *buffer)
 {
     free(buffer);
 }
+
+
+
 
 
 

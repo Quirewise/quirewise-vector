@@ -43,6 +43,8 @@ typedef struct QwCadEntity {
     size_t point_count;
     int closed;
     int filled;
+    size_t *contour_starts;
+    size_t contour_count;
     char *text;
     size_t text_size;
     char *block_name;

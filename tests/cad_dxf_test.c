@@ -213,7 +213,7 @@ int main(void)
     {
         unsigned char unsupported[0x19];
         memset(unsupported, 0, sizeof(unsupported));
-        memcpy(unsupported, "AC1021", 6u);
+        memcpy(unsupported, "AC1024", 6u);
         ok &= check(qw_cad_parse(unsupported, sizeof(unsupported), &document) ==
                         QW_CAD_ERR_UNSUPPORTED,
                     "DWG explicit unsupported");
@@ -283,6 +283,23 @@ int main(void)
     }
     ok &= check_dwg("circle_2004.dwg", QW_CAD_OK, 1u, 0.0, 0.0, 100.0, 100.0);
     ok &= check_dwg("arc_2004.dwg", QW_CAD_OK, 1u, 50.0, 50.0, 100.0, 75.0);
+    ok &= check_dwg("line_2007.dwg", QW_CAD_OK, 1u, 50.0, 50.0, 100.0,
+                         100.0);
+    ok &= check_dwg("circle_2007.dwg", QW_CAD_OK, 1u, 0.0, 0.0, 100.0, 100.0);
+    ok &= check_dwg("arc_2007.dwg", QW_CAD_OK, 1u, 50.0, 50.0, 100.0, 75.0);
+    {
+        size_t size = 0u;
+        unsigned char *data = load_file(
+            QW_CAD_TEST_DATA_DIR "/lw_example2007.dwg", &size);
+        if (data) {
+            QwCadDocument *drawing = NULL;
+            if (qw_cad_parse(data, size, &drawing) == QW_CAD_OK && drawing)
+                ok &= check(qw_cad_entity_count(drawing) > 0u,
+                            "R2007 mixed entities");
+            qw_cad_document_free(drawing);
+            free(data);
+        }
+    }
     {
         size_t size = 0u;
         unsigned char *data = load_file(
@@ -321,6 +338,8 @@ int main(void)
     printf("cad dxf tests passed\n");
     return 0;
 }
+
+
 
 
 

@@ -19,10 +19,11 @@ CMake target: `Quirewise::Vector`. Public headers are under
 - DWG: R13/R14/R2000 (AC1012/AC1014/AC1015) segment directory, object map,
   object records, common entity head and LINE/CIRCLE/ARC/LWPOLYLINE/TEXT
   geometry and text; R2004 (AC1018) adds the encrypted container header, page
-  map, section map, LZ77 data pages and `AcDb:Handles` object index.
-  R2007+ is version-detected only and returns `UNSUPPORTED`. The implementation
-  is modelled on `unitedrhino/go-cad` (Apache-2.0) but contains no Go or
-  third-party CAD code.
+  map, section map, LZ77 data pages and `AcDb:Handles` object index; R2007
+  (AC1021) adds RS deinterleaving, R21 decompression and its section/data-page
+  layout. R2010+ is version-detected only and returns `UNSUPPORTED`. The
+  implementation is modelled on `unitedrhino/go-cad` (Apache-2.0) but contains
+  no Go or third-party CAD code.
 
 ## Boundaries
 

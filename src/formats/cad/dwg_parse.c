@@ -890,6 +890,512 @@ static uint8_t *assemble_section(const uint8_t *data, size_t size,
     }
     return NULL;
 }
+/* ---- R2007 (AC1021) RS-interleaved container ---- */
+
+typedef struct R2007Page {
+    int64_t id;
+    uint64_t size;
+    uint64_t address;
+} R2007Page;
+
+typedef struct R2007Pages {
+    R2007Page *items;
+    size_t count;
+    size_t capacity;
+} R2007Pages;
+
+typedef struct R2007PageInfo {
+    uint64_t offset;
+    uint64_t id;
+    uint64_t size_uncompressed;
+    uint64_t size_compressed;
+} R2007PageInfo;
+
+typedef struct R2007Section {
+    uint64_t size;
+    uint64_t encoded;
+    char name[128];
+    R2007PageInfo *pages;
+    size_t page_count;
+} R2007Section;
+
+typedef struct R2007Sections {
+    R2007Section *items;
+    size_t count;
+    size_t capacity;
+} R2007Sections;
+
+typedef struct R2007Header {
+    uint64_t pages_map_offset;
+    uint64_t pages_map_size_compressed;
+    uint64_t pages_map_size_uncompressed;
+    uint64_t pages_map_correction;
+    uint64_t sections_map_id;
+    uint64_t sections_map_size_compressed;
+    uint64_t sections_map_size_uncompressed;
+    uint64_t sections_map_correction;
+    uint64_t sections_amount;
+} R2007Header;
+
+static uint64_t r2007_align_up(uint64_t value, uint64_t align)
+{
+    if (align == 0u) return value;
+    return (value + align - 1u) / align * align;
+}
+
+static uint64_t r2007_div_ceil(uint64_t value, uint64_t divisor)
+{
+    if (value == 0u) return 0u;
+    return (value + divisor - 1u) / divisor;
+}
+
+static uint8_t *r2007_deinterleave(const uint8_t *source, size_t source_size,
+                                   size_t k, size_t block_count,
+                                   uint8_t method, size_t *out_size)
+{
+    size_t total = k * block_count;
+    uint8_t *out;
+    size_t position;
+    if (total == 0u) {
+        *out_size = 0u;
+        return (uint8_t *)calloc(1u, 1u);
+    }
+    if (source_size < total || method != 4u) return NULL;
+    out = (uint8_t *)malloc(total);
+    if (!out) return NULL;
+    for (position = 0u; position < total; ++position)
+        out[position] = source[(position % k) * block_count + position / k];
+    *out_size = total;
+    return out;
+}
+
+static int r2007_header(const uint8_t *data, size_t size, R2007Header *header)
+{
+    uint8_t *decoded = NULL;
+    size_t decoded_size = 0u;
+    int32_t compressed_size;
+    uint8_t *body = NULL;
+    size_t body_size = 0u;
+    memset(header, 0, sizeof(*header));
+    if (size < 0x80u + 0x3D8u) return 0;
+    decoded = r2007_deinterleave(data + 0x80u, 0x3D8u, 239u, 3u, 4u,
+                                 &decoded_size);
+    if (!decoded || decoded_size < 0x20u) {
+        free(decoded);
+        return 0;
+    }
+    memcpy(&compressed_size, decoded + 24u, 4u);
+    if (compressed_size < 0) {
+        size_t stored = (size_t)(-(int64_t)compressed_size);
+        if (0x20u + stored > decoded_size) {
+            free(decoded);
+            return 0;
+        }
+        body = (uint8_t *)malloc(stored ? stored : 1u);
+        if (!body) {
+            free(decoded);
+            return 0;
+        }
+        memcpy(body, decoded + 0x20u, stored);
+        body_size = stored;
+    } else if (compressed_size > 0) {
+        if (!qw_dwg_r21_decompress(decoded + 0x20u, (size_t)compressed_size,
+                                   &body, 0x110u)) {
+            free(decoded);
+            return 0;
+        }
+        body_size = 0x110u;
+    } else {
+        free(decoded);
+        return 0;
+    }
+    free(decoded);
+    if (body_size < 0x110u) {
+        free(body);
+        return 0;
+    }
+    {
+        const uint8_t *b = body;
+        #define R2007_FIELD(slot) \
+            ((uint64_t)b[(slot) * 8u] | ((uint64_t)b[(slot) * 8u + 1u] << 8u) | \
+             ((uint64_t)b[(slot) * 8u + 2u] << 16u) | \
+             ((uint64_t)b[(slot) * 8u + 3u] << 24u) | \
+             ((uint64_t)b[(slot) * 8u + 4u] << 32u) | \
+             ((uint64_t)b[(slot) * 8u + 5u] << 40u) | \
+             ((uint64_t)b[(slot) * 8u + 6u] << 48u) | \
+             ((uint64_t)b[(slot) * 8u + 7u] << 56u))
+        header->pages_map_offset = R2007_FIELD(7);
+        header->pages_map_size_compressed = R2007_FIELD(10);
+        header->pages_map_size_uncompressed = R2007_FIELD(11);
+        header->pages_map_correction = R2007_FIELD(3);
+        header->sections_map_id = R2007_FIELD(24);
+        header->sections_map_size_compressed = R2007_FIELD(22);
+        header->sections_map_size_uncompressed = R2007_FIELD(25);
+        header->sections_map_correction = R2007_FIELD(27);
+        header->sections_amount = R2007_FIELD(20);
+        #undef R2007_FIELD
+    }
+    free(body);
+    return 1;
+}
+
+static uint8_t *r2007_take_payload(uint8_t *decoded, size_t decoded_size,
+                                   uint64_t compressed, uint64_t uncompressed,
+                                   size_t *out_size)
+{
+    if (compressed < uncompressed) {
+        uint8_t *out = NULL;
+        if (compressed > decoded_size) {
+            free(decoded);
+            return NULL;
+        }
+        if (!qw_dwg_r21_decompress(decoded, (size_t)compressed, &out,
+                                   (size_t)uncompressed)) {
+            free(decoded);
+            return NULL;
+        }
+        free(decoded);
+        *out_size = (size_t)uncompressed;
+        return out;
+    }
+    if (uncompressed > decoded_size) {
+        free(decoded);
+        return NULL;
+    }
+    *out_size = (size_t)uncompressed;
+    return decoded;
+}
+
+static uint8_t *r2007_system_page(const uint8_t *data, size_t size,
+                                  uint64_t address, uint64_t compressed,
+                                  uint64_t uncompressed,
+                                  uint64_t correction, size_t *out_size)
+{
+    uint64_t compressed_padded = r2007_align_up(compressed, 8u);
+    uint64_t pre_encoded = compressed_padded * correction;
+    uint64_t blocks = r2007_div_ceil(pre_encoded, 239u);
+    uint64_t page_size = r2007_align_up(blocks * 255u, 0x20u);
+    uint8_t *decoded;
+    size_t decoded_size = 0u;
+    if (address > size || page_size > size - address) return NULL;
+    decoded = r2007_deinterleave(data + address, (size_t)page_size, 239u,
+                                 (size_t)blocks, 4u, &decoded_size);
+    if (!decoded) return NULL;
+    return r2007_take_payload(decoded, decoded_size, compressed, uncompressed,
+                              out_size);
+}
+
+static int r2007_pages_add(R2007Pages *pages, int64_t id, uint64_t size,
+                           uint64_t address)
+{
+    if (pages->count == pages->capacity) {
+        size_t next = pages->capacity ? pages->capacity * 2u : 64u;
+        R2007Page *grown =
+            (R2007Page *)realloc(pages->items, next * sizeof(*grown));
+        if (!grown) return 0;
+        pages->items = grown;
+        pages->capacity = next;
+    }
+    pages->items[pages->count].id = id;
+    pages->items[pages->count].size = size;
+    pages->items[pages->count].address = address;
+    ++pages->count;
+    return 1;
+}
+
+static int r2007_parse_pages(const uint8_t *data, size_t size,
+                             const R2007Header *header, R2007Pages *pages)
+{
+    uint8_t *blob;
+    size_t blob_size = 0u;
+    uint64_t address = 0x480u;
+    size_t position = 0u;
+    blob = r2007_system_page(data, size, 0x480u + header->pages_map_offset,
+                             header->pages_map_size_compressed,
+                             header->pages_map_size_uncompressed,
+                             header->pages_map_correction, &blob_size);
+    if (!blob) return 0;
+    while (position + 16u <= blob_size) {
+        uint64_t page_size = 0u;
+        uint64_t id = 0u;
+        size_t byte;
+        for (byte = 0u; byte < 8u; ++byte) {
+            page_size |= (uint64_t)blob[position + byte] << (8u * byte);
+            id |= (uint64_t)blob[position + 8u + byte] << (8u * byte);
+        }
+        position += 16u;
+        if (page_size == 0u && id == 0u) break;
+        if (page_size == 0u || page_size >= (1ULL << 63u)) {
+            free(blob);
+            return 0;
+        }
+        if (!r2007_pages_add(pages, (int64_t)id, page_size, address)) {
+            free(blob);
+            return 0;
+        }
+        address += page_size;
+    }
+    free(blob);
+    return pages->count > 0u;
+}
+
+static const R2007Page *r2007_find_page(const R2007Pages *pages, int64_t id)
+{
+    size_t index;
+    for (index = 0u; index < pages->count; ++index) {
+        if (pages->items[index].id == id) return &pages->items[index];
+    }
+    return NULL;
+}
+
+static void r2007_sections_free(R2007Sections *sections)
+{
+    size_t index;
+    for (index = 0u; index < sections->count; ++index)
+        free(sections->items[index].pages);
+    free(sections->items);
+    sections->items = NULL;
+    sections->count = 0u;
+    sections->capacity = 0u;
+}
+
+static uint64_t r2007_u64(const uint8_t *data)
+{
+    uint64_t value = 0u;
+    size_t index;
+    for (index = 0u; index < 8u; ++index)
+        value |= (uint64_t)data[index] << (8u * index);
+    return value;
+}
+
+static void r2007_utf16_name(const uint8_t *data, size_t size, char *out,
+                             size_t capacity)
+{
+    size_t input = 0u;
+    size_t used = 0u;
+    while (input + 1u < size && used + 1u < capacity) {
+        uint32_t code = (uint32_t)data[input] | ((uint32_t)data[input + 1u] << 8u);
+        input += 2u;
+        if (code == 0u) break;
+        if (code < 0x80u) {
+            out[used++] = (char)code;
+        } else if (code < 0x800u) {
+            out[used++] = (char)(0xC0u | (code >> 6u));
+            out[used++] = (char)(0x80u | (code & 0x3Fu));
+        } else {
+            out[used++] = (char)(0xE0u | (code >> 12u));
+            out[used++] = (char)(0x80u | ((code >> 6u) & 0x3Fu));
+            out[used++] = (char)(0x80u | (code & 0x3Fu));
+        }
+    }
+    out[used < capacity ? used : capacity - 1u] = '\0';
+}
+
+static int r2007_add_section(R2007Sections *sections, uint64_t size,
+                             uint64_t encoded, const char *name,
+                             size_t page_count)
+{
+    R2007Section *section;
+    if (sections->count == sections->capacity) {
+        size_t next = sections->capacity ? sections->capacity * 2u : 16u;
+        R2007Section *grown =
+            (R2007Section *)realloc(sections->items, next * sizeof(*grown));
+        if (!grown) return 0;
+        sections->items = grown;
+        sections->capacity = next;
+    }
+    section = &sections->items[sections->count++];
+    memset(section, 0, sizeof(*section));
+    section->size = size;
+    section->encoded = encoded;
+    {
+        size_t name_length = strlen(name);
+        if (name_length >= sizeof(section->name))
+            name_length = sizeof(section->name) - 1u;
+        memcpy(section->name, name, name_length);
+        section->name[name_length] = '\0';
+    }
+    section->pages = page_count
+                         ? (R2007PageInfo *)calloc(page_count,
+                                                   sizeof(*section->pages))
+                         : NULL;
+    if (page_count && !section->pages) return 0;
+    section->page_count = page_count;
+    return 1;
+}
+
+static int r2007_parse_sections(const uint8_t *data, size_t size,
+                                const R2007Header *header,
+                                const R2007Pages *pages,
+                                R2007Sections *sections)
+{
+    const R2007Page *map_page =
+        r2007_find_page(pages, (int64_t)header->sections_map_id);
+    uint8_t *blob;
+    size_t blob_size = 0u;
+    size_t position = 0u;
+    uint64_t index;
+    if (!map_page) return 0;
+    blob = r2007_system_page(data, size, map_page->address,
+                             header->sections_map_size_compressed,
+                             header->sections_map_size_uncompressed,
+                             header->sections_map_correction, &blob_size);
+    if (!blob) return 0;
+    for (index = 0u; position + 64u <= blob_size; ++index) {
+        uint64_t section_size;
+        uint64_t name_length;
+        uint64_t encoded;
+        uint64_t page_count;
+        char name[128];
+        size_t page;
+        if (header->sections_amount > 0u && index + 1u >= header->sections_amount)
+            break;
+        section_size = r2007_u64(blob + position);
+        name_length = r2007_u64(blob + position + 32u);
+        encoded = r2007_u64(blob + position + 48u);
+        page_count = r2007_u64(blob + position + 56u);
+        position += 64u;
+        if (section_size == 0u && name_length == 0u && page_count == 0u) break;
+        if (name_length > blob_size - position || page_count > 65536u) {
+            free(blob);
+            return 0;
+        }
+        r2007_utf16_name(blob + position, (size_t)name_length, name,
+                         sizeof(name));
+        position += (size_t)name_length;
+        if (!r2007_add_section(sections, section_size, encoded, name,
+                               (size_t)page_count)) {
+            free(blob);
+            return 0;
+        }
+        {
+            R2007Section *section = &sections->items[sections->count - 1u];
+            for (page = 0u; page < section->page_count; ++page) {
+                if (position + 56u > blob_size) {
+                    free(blob);
+                    return 0;
+                }
+                section->pages[page].offset = r2007_u64(blob + position);
+                section->pages[page].id = r2007_u64(blob + position + 16u);
+                section->pages[page].size_uncompressed =
+                    r2007_u64(blob + position + 24u);
+                section->pages[page].size_compressed =
+                    r2007_u64(blob + position + 32u);
+                position += 56u;
+            }
+        }
+    }
+    free(blob);
+    return sections->count > 0u;
+}
+
+static uint8_t *r2007_read_data_page(const uint8_t *data, size_t size,
+                                     const R2007Page *slot,
+                                     uint64_t encoded,
+                                     uint64_t compressed,
+                                     uint64_t uncompressed,
+                                     size_t *out_size)
+{
+    uint64_t blocks = r2007_div_ceil(r2007_align_up(compressed, 8u), 251u);
+    uint64_t min_page = 251u * blocks;
+    uint64_t read_size = slot->size > min_page ? slot->size : min_page;
+    uint8_t *page;
+    size_t page_size = 0u;
+    uint8_t method = (uint8_t)encoded;
+    if (slot->address > size || read_size > size - slot->address) return NULL;
+    if (method == 0u) {
+        page = (uint8_t *)malloc((size_t)read_size);
+        if (!page) return NULL;
+        memcpy(page, data + slot->address, (size_t)read_size);
+        page_size = (size_t)read_size;
+    } else if (method == 1u || method == 4u) {
+        page = r2007_deinterleave(data + slot->address, (size_t)read_size,
+                                  251u, (size_t)blocks, method, &page_size);
+        if (!page) return NULL;
+    } else {
+        return NULL;
+    }
+    {
+        uint8_t *result =
+            r2007_take_payload(page, page_size, compressed, uncompressed,
+                               out_size);
+        if (result) return result;
+    }
+    return NULL;
+}
+
+static uint8_t *r2007_assemble(const uint8_t *data, size_t size,
+                               const R2007Section *section,
+                               const R2007Pages *pages, size_t *out_size)
+{
+    uint8_t *out;
+    size_t page;
+    if (section->size > (1ULL << 31u)) return NULL;
+    out = (uint8_t *)calloc(1u, (size_t)section->size ? (size_t)section->size
+                                                      : 1u);
+    if (!out) return NULL;
+    for (page = 0u; page < section->page_count; ++page) {
+        const R2007Page *slot =
+            r2007_find_page(pages, (int64_t)section->pages[page].id);
+        uint8_t *page_data;
+        size_t page_size = 0u;
+        uint64_t start;
+        uint64_t length;
+        if (!slot) {
+            free(out);
+            return NULL;
+        }
+        page_data = r2007_read_data_page(
+            data, size, slot, section->encoded,
+            section->pages[page].size_compressed,
+            section->pages[page].size_uncompressed, &page_size);
+        if (!page_data) {
+            free(out);
+            return NULL;
+        }
+        start = section->pages[page].offset;
+        if (start < section->size) {
+            length = page_size;
+            if (length > section->size - start) length = section->size - start;
+            memcpy(out + start, page_data, (size_t)length);
+        }
+        free(page_data);
+    }
+    *out_size = (size_t)section->size;
+    return out;
+}
+
+static uint8_t *r2007_named_section(const uint8_t *data, size_t size,
+                                    const char *name, size_t *out_size)
+{
+    R2007Header header;
+    R2007Pages pages;
+    R2007Sections sections;
+    size_t index;
+    uint8_t *result = NULL;
+    memset(&pages, 0, sizeof(pages));
+    memset(&sections, 0, sizeof(sections));
+    if (!r2007_header(data, size, &header)) return NULL;
+    if (!r2007_parse_pages(data, size, &header, &pages)) {
+        free(pages.items);
+        return NULL;
+    }
+    if (!r2007_parse_sections(data, size, &header, &pages, &sections)) {
+        free(pages.items);
+        r2007_sections_free(&sections);
+        return NULL;
+    }
+    for (index = 0u; index < sections.count; ++index) {
+        if (strcmp(sections.items[index].name, name) == 0) {
+            result = r2007_assemble(data, size, &sections.items[index], &pages,
+                                    out_size);
+            break;
+        }
+    }
+    free(pages.items);
+    r2007_sections_free(&sections);
+    return result;
+}
 static void parse_color_head(DwgBits *bits, DwgHead *head)
 {
     uint8_t no_links = bits_read(bits, 1u);
@@ -920,6 +1426,8 @@ static void parse_color_head(DwgBits *bits, DwgHead *head)
 #define DWG_HEAD_PICTURE_RL 0x02u
 #define DWG_HEAD_LINEWEIGHT 0x04u
 #define DWG_HEAD_NOLINKS 0x08u
+#define DWG_HEAD_MATERIAL 0x10u
+#define DWG_HEAD_SHADOW 0x20u
 
 static int parse_head(DwgBits *bits, uint64_t data_end, uint64_t expected_handle,
                       unsigned features, DwgHead *head, uint64_t *data_start)
@@ -958,6 +1466,8 @@ static int parse_head(DwgBits *bits, uint64_t data_end, uint64_t expected_handle
     head->ltype_scale = bits_bd(bits);
     head->ltype_flags = (uint8_t)bits_read(bits, 2u);
     head->plotstyle_flags = (uint8_t)bits_read(bits, 2u);
+    if (features & DWG_HEAD_MATERIAL) (void)bits_read(bits, 2u);
+    if (features & DWG_HEAD_SHADOW) (void)bits_rc(bits);
     head->invisible = (int16_t)bits_bs(bits);
     if (features & DWG_HEAD_LINEWEIGHT) (void)bits_rc(bits);
     *data_start = bits->bit;
@@ -1332,7 +1842,7 @@ static DwgEntityDecoder decoder_for(uint16_t type)
 
 static int parse_entity_record(const uint8_t *data, size_t size,
                                const DwgRef *ref, QwCadDocument *document,
-                               int legacy, int r2004)
+                               int legacy, int version)
 {
     static const unsigned layouts_r2000[] = {
         DWG_HEAD_OBJ_SIZE | DWG_HEAD_PICTURE_RL | DWG_HEAD_LINEWEIGHT |
@@ -1345,7 +1855,17 @@ static int parse_entity_record(const uint8_t *data, size_t size,
         DWG_HEAD_PICTURE_RL | DWG_HEAD_LINEWEIGHT,
         DWG_HEAD_OBJ_SIZE | DWG_HEAD_PICTURE_RL
     };
-    const unsigned *layouts = r2004 ? layouts_r2004 : layouts_r2000;
+    static const unsigned layouts_r2007[] = {
+        DWG_HEAD_OBJ_SIZE | DWG_HEAD_PICTURE_RL | DWG_HEAD_MATERIAL |
+            DWG_HEAD_SHADOW | DWG_HEAD_LINEWEIGHT,
+        DWG_HEAD_OBJ_SIZE | DWG_HEAD_PICTURE_RL | DWG_HEAD_MATERIAL |
+            DWG_HEAD_LINEWEIGHT,
+        DWG_HEAD_OBJ_SIZE | DWG_HEAD_PICTURE_RL | DWG_HEAD_MATERIAL
+    };
+    const unsigned *layouts = version == 2 ? layouts_r2007
+                               : version == 1 ? layouts_r2004
+                                              : layouts_r2000;
+    const unsigned layout_count = version == 2 ? 3u : 3u;
     DwgBits bits;
     uint64_t record_start;
     uint32_t record_size;
@@ -1368,13 +1888,14 @@ static int parse_entity_record(const uint8_t *data, size_t size,
     type = bits_bs(&bits);
     if (bits.failed) return 0;
     decoder = decoder_for(type);
+    if (version == 2 && type == 0x01) decoder = NULL;
     if (!decoder) {
         if (getenv("QUIREWISE_CAD_DWG_TRACE"))
             fprintf(stderr, "DWG handle %llu type 0x%X unsupported\n",
                     (unsigned long long)ref->handle, type);
         return 0;
     }
-    for (layout = 0u; layout < 3u; ++layout) {
+    for (layout = 0u; layout < layout_count; ++layout) {
         DwgHead head;
         uint64_t data_start = 0u;
         size_t entity_count = document->entity_count;
@@ -1506,6 +2027,58 @@ static QwCadStatus parse_r2004_document(const uint8_t *bytes, size_t size,
     *out_document = document;
     return QW_CAD_OK;
 }
+static QwCadStatus parse_r2007_document(const uint8_t *bytes, size_t size,
+                                       QwCadDocument **out_document)
+{
+    uint8_t *objects = NULL;
+    size_t objects_size = 0u;
+    uint8_t *handles = NULL;
+    size_t handles_size = 0u;
+    DwgRefs refs;
+    QwCadDocument *document;
+    size_t index;
+    const char *trace = getenv("QUIREWISE_CAD_DWG_TRACE");
+    memset(&refs, 0, sizeof(refs));
+    objects = r2007_named_section(bytes, size, "AcDb:AcDbObjects",
+                                  &objects_size);
+    handles = r2007_named_section(bytes, size, "AcDb:Handles", &handles_size);
+    if (!objects || !handles) {
+        if (trace) fprintf(stderr, "R2007 objects/handles missing\n");
+        free(objects);
+        free(handles);
+        return QW_CAD_ERR_FORMAT;
+    }
+    if (trace) fprintf(stderr, "R2007 objects=%zu handles=%zu\n", objects_size,
+                       handles_size);
+    if (!parse_object_map(handles, handles_size, &refs)) {
+        free(objects);
+        free(handles);
+        return QW_CAD_ERR_FORMAT;
+    }
+    if (trace) fprintf(stderr, "R2007 refs=%zu\n", refs.count);
+    free(handles);
+    document = (QwCadDocument *)calloc(1u, sizeof(*document));
+    if (!document) {
+        free(objects);
+        refs_free(&refs);
+        return QW_CAD_ERR_OUT_OF_MEMORY;
+    }
+    document->format = QW_CAD_FORMAT_DWG;
+    document->utf8_strings = 1;
+    qw_cad_document_layer_index(document, "0", 1);
+    if (document->layer_count > 0u)
+        document->layers[0].color = 0x00000000u;
+    for (index = 0u; index < refs.count; ++index) {
+        (void)parse_entity_record(objects, objects_size, &refs.items[index],
+                                  document, 0, 2);
+        if (document->entity_count >= DWG_MAX_OBJECTS) break;
+    }
+    refs_free(&refs);
+    free(objects);
+    qw_cad_document_compute_bounds(document);
+    *out_document = document;
+    return QW_CAD_OK;
+}
 QwCadStatus qw_cad_parse_dwg(const void *data, size_t size,
                              QwCadDocument **out_document)
 {
@@ -1523,6 +2096,8 @@ QwCadStatus qw_cad_parse_dwg(const void *data, size_t size,
     if (size > QW_CAD_MAX_INPUT) return QW_CAD_ERR_RESOURCE_LIMIT;
     if (memcmp(bytes, "AC1018", 6u) == 0)
         return parse_r2004_document(bytes, size, out_document);
+    if (memcmp(bytes, "AC1021", 6u) == 0)
+        return parse_r2007_document(bytes, size, out_document);
     legacy = memcmp(bytes, "AC1014", 6u) == 0 ||
              memcmp(bytes, "AC1012", 6u) == 0;
     if (memcmp(bytes, "AC1015", 6u) != 0 && !legacy)
@@ -1561,6 +2136,10 @@ QwCadStatus qw_cad_parse_dwg(const void *data, size_t size,
     *out_document = document;
     return QW_CAD_OK;
 }
+
+
+
+
 
 
 

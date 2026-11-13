@@ -1,4 +1,4 @@
-#include "formats/cad/cad_internal.h"
+﻿#include "formats/cad/cad_internal.h"
 
 #include <quirewise/charset.h>
 
@@ -889,6 +889,55 @@ static int skip_until_zero(QwCadParser *parser)
     }
 }
 
+static int parse_hatch_entity(QwCadParser *parser, QwCadEntity *parsed)
+{
+    DxfPair pair;
+    int solid = 0;
+    for (;;) {
+        if (!dxf_next(&parser->lexer, &pair)) return 0;
+        if (pair.code == 0) {
+            dxf_unread(&parser->lexer, &pair);
+            break;
+        }
+        if (pair.code == 8) {
+            size_t length = 0u;
+            set_entity_layer(parser, parsed, pair_string(&pair, &length));
+        } else if (pair.code == 62 || pair.code == 420) {
+            set_entity_color(parsed, &pair);
+        } else if (pair.code == 70) {
+            solid = pair_double(&pair) != 0.0;
+        } else if (pair.code == 10) {
+            entity_add_point(parsed, (QwCadPoint){pair_double(&pair), 0.0});
+        } else if (pair.code == 20 && parsed->point_count > 0u) {
+            parsed->points[parsed->point_count - 1u].y =
+                pair_double(&pair);
+        }
+    }
+    if (!solid || parsed->point_count < 3u) return 1;
+    if (parsed->point_count > 4u) {
+        QwCadPoint first = parsed->points[0];
+        QwCadPoint last = parsed->points[parsed->point_count - 1u];
+        if (fabs(first.x - last.x) < 1e-9 && fabs(first.y - last.y) < 1e-9)
+            --parsed->point_count;
+    }
+    if (parsed->point_count == 4u) {
+        parsed->kind = QW_CAD_ENTITY_SOLID;
+        parsed->p[0] = parsed->points[0];
+        parsed->p[1] = parsed->points[1];
+        parsed->p[2] = parsed->points[2];
+        parsed->p[3] = parsed->points[3];
+    } else if (parsed->point_count == 3u) {
+        parsed->kind = QW_CAD_ENTITY_SOLID;
+        parsed->p[0] = parsed->points[0];
+        parsed->p[1] = parsed->points[1];
+        parsed->p[2] = parsed->points[2];
+        parsed->p[3] = parsed->points[2];
+    } else {
+        parsed->kind = QW_CAD_ENTITY_POLYLINE;
+        parsed->closed = 1;
+    }
+    return 1;
+}
 static int parse_entity(QwCadParser *parser, const char *type, QwCadEntity **out_list, size_t *out_count, size_t *out_capacity)
 {
     QwCadEntity parsed;
@@ -1023,6 +1072,8 @@ static int parse_entity(QwCadParser *parser, const char *type, QwCadEntity **out
                 parsed.p[pair.code - 20].y = pair_double(&pair);
             }
         }
+    } else if (strcmp(type, "HATCH") == 0) {
+        ok = parse_hatch_entity(parser, &parsed);
     } else if (strcmp(type, "LEADER") == 0) {
         parsed.kind = QW_CAD_ENTITY_POLYLINE;
         for (;;) {
@@ -1468,6 +1519,7 @@ void qw_cad_buffer_free(void *buffer)
 {
     free(buffer);
 }
+
 
 
 

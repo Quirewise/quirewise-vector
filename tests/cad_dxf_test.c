@@ -194,6 +194,34 @@ int main(void)
     qw_cad_document_free(document);
     document = NULL;
 
+    {
+        static const char hatch_dxf[] =
+            "0\nSECTION\n2\nENTITIES\n"
+            "0\nHATCH\n8\nHATCH\n62\n1\n70\n1\n91\n1\n93\n4\n"
+            "10\n0\n20\n0\n10\n100\n20\n0\n"
+            "10\n100\n20\n100\n10\n0\n20\n100\n"
+            "0\nENDSEC\n0\nEOF\n";
+        QwCadDocument *hatch = NULL;
+        QwCadBounds hatch_bounds;
+        ok &= check(qw_cad_parse(hatch_dxf, sizeof(hatch_dxf) - 1u, &hatch) ==
+                        QW_CAD_OK &&
+                    hatch && qw_cad_entity_count(hatch) == 1u,
+                    "hatch parse");
+        ok &= check(hatch &&
+                        qw_cad_bounds(hatch, &hatch_bounds) == QW_CAD_OK &&
+                        hatch_bounds.max_x > 99.0 && hatch_bounds.max_y > 99.0,
+                    "hatch bounds");
+        if (hatch) {
+            char *hatch_svg = NULL;
+            size_t hatch_svg_size = 0u;
+            ok &= check(qw_cad_render_svg(hatch, &hatch_svg,
+                                          &hatch_svg_size) == QW_CAD_OK &&
+                            hatch_svg && strstr(hatch_svg, "<polygon") != NULL,
+                        "hatch svg fill");
+            qw_cad_buffer_free(hatch_svg);
+        }
+        qw_cad_document_free(hatch);
+    }
     binary_size = build_binary_dxf(binary);
     ok &= check(qw_cad_probe(binary, binary_size), "binary probe");
     ok &= check(qw_cad_parse(binary, binary_size, &document) == QW_CAD_OK,
@@ -364,6 +392,7 @@ int main(void)
     printf("cad dxf tests passed\n");
     return 0;
 }
+
 
 
 

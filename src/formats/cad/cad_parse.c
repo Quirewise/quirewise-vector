@@ -908,6 +908,13 @@ static int parse_hatch_entity(QwCadParser *parser, QwCadEntity *parsed)
     int path_count = 0;
     int expect_paths = 0;
     int in_path = 1;
+    int edge_type = 0;
+    int edge_center_set = 0;
+    double edge_radius = 0.0;
+    double edge_start = 0.0;
+    double edge_end = 6.283185307179586;
+    double edge_cx = 0.0;
+    double edge_cy = 0.0;
     for (;;) {
         if (!dxf_next(&parser->lexer, &pair)) return 0;
         if (pair.code == 0) {
@@ -930,19 +937,49 @@ static int parse_hatch_entity(QwCadParser *parser, QwCadEntity *parsed)
                 ++path_count;
                 in_path = 1;
             }
+        } else if (pair.code == 72) {
+            edge_type = (int)pair_double(&pair);
+        } else if (pair.code == 40) {
+            edge_radius = pair_double(&pair);
+        } else if (pair.code == 50) {
+            edge_start = pair_double(&pair) * 3.141592653589793 / 180.0;
+        } else if (pair.code == 51) {
+            edge_end = pair_double(&pair) * 3.141592653589793 / 180.0;
         } else if (pair.code == 75 || pair.code == 76 || pair.code == 52 ||
                    pair.code == 78 || pair.code == 47) {
             in_path = 0;
         } else if (pair.code == 10 && in_path) {
-            if (!entity_add_point(parsed,
-                                  (QwCadPoint){pair_double(&pair), 0.0}))
-                return 0;
-        } else if (pair.code == 20 && in_path && parsed->point_count > 0u) {
-            parsed->points[parsed->point_count - 1u].y =
-                pair_double(&pair);
+            if (edge_type == 0) {
+                if (!entity_add_point(parsed,
+                                      (QwCadPoint){pair_double(&pair), 0.0}))
+                    return 0;
+            } else if (edge_type == 2 && !edge_center_set) {
+                edge_cx = pair_double(&pair);
+                edge_center_set = 1;
+            }
+        } else if (pair.code == 20 && in_path) {
+            if (edge_type == 0 && parsed->point_count > 0u)
+                parsed->points[parsed->point_count - 1u].y =
+                    pair_double(&pair);
+            else if (edge_type == 2 && edge_center_set)
+                edge_cy = pair_double(&pair);
         }
     }
-    if (parsed->contour_count == 0u && parsed->point_count >= 3u) {
+    if (edge_type == 2 && edge_center_set && edge_radius > 0.0) {
+        size_t start_index = parsed->contour_count
+                                 ? parsed->contour_starts[parsed->contour_count - 1u]
+                                 : 0u;
+        double sweep = edge_end - edge_start;
+        int segment;
+        if (sweep <= 0.0) sweep += 6.283185307179586;
+        parsed->point_count = start_index;
+        for (segment = 0; segment <= 64; ++segment) {
+            double angle = edge_start + sweep * (double)segment / 64.0;
+            double x = edge_cx + edge_radius * cos(angle);
+            double y = edge_cy + edge_radius * sin(angle);
+            if (!entity_add_point(parsed, (QwCadPoint){x, y})) return 0;
+        }
+    }    if (parsed->contour_count == 0u && parsed->point_count >= 3u) {
         if (!entity_add_contour(parsed, 0u)) return 0;
     }
     if (!solid || parsed->point_count < 3u) {
@@ -1549,6 +1586,7 @@ void qw_cad_buffer_free(void *buffer)
 {
     free(buffer);
 }
+
 
 
 

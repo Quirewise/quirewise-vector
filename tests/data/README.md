@@ -10,5 +10,8 @@ implementation code is linked into Quirewise.
 - `circle_R14.dwg` — AC1014, one CIRCLE at (50,50) r=50.
 - `arc_R14.dwg` — AC1014, one ARC at (75,50) r=25, 0°–180°.
 - `lw_entities-2d.dwg` — AC1015, mixed common entities incl. LWPOLYLINE.
-- `circle_2004.dwg` — AC1018, used to check the explicit unsupported-version
-  boundary (R2004 paged containers are a later phase).
+- `line_2004.dwg` — AC1018, one LINE from (50,50) to (100,100).
+- `text_2004.dwg` — AC1018, one TEXT "Hello TEXT" at (50,50).
+- `lw_example2004.dwg` — AC1018, mixed drawing used for the R2004 page/segment
+  and entity-path smoke.
+- `circle_2004.dwg` — AC1018, one CIRCLE at (50,50) r=50.

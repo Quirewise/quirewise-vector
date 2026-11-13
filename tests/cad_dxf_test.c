@@ -263,6 +263,24 @@ int main(void)
     }
     ok &= check_dwg("line_2004.dwg", QW_CAD_OK, 1u, 50.0, 50.0, 100.0,
                          100.0);
+    ok &= check_dwg("text_2004.dwg", QW_CAD_OK, 1u, 50.0, 50.0, 80.0, 55.0);
+    {
+        size_t size = 0u;
+        unsigned char *data =
+            load_file(QW_CAD_TEST_DATA_DIR "/text_2004.dwg", &size);
+        if (data) {
+            QwCadDocument *drawing = NULL;
+            QwCadTextInfo info;
+            if (qw_cad_parse(data, size, &drawing) == QW_CAD_OK && drawing &&
+                qw_cad_text_at(drawing, 0u, &info) == QW_CAD_OK) {
+                ok &= check(info.text_size == 10u &&
+                                memcmp(info.text, "Hello TEXT", 10u) == 0,
+                            "R2004 TEXT value");
+            }
+            qw_cad_document_free(drawing);
+            free(data);
+        }
+    }
     ok &= check_dwg("circle_2004.dwg", QW_CAD_OK, 1u, 0.0, 0.0, 100.0, 100.0);
     ok &= check_dwg("arc_2004.dwg", QW_CAD_OK, 1u, 50.0, 50.0, 100.0, 75.0);
     {
@@ -303,6 +321,7 @@ int main(void)
     printf("cad dxf tests passed\n");
     return 0;
 }
+
 
 
 

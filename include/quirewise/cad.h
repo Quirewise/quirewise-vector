@@ -61,6 +61,7 @@ typedef struct QwCadTextInfo {
 
 typedef struct QwCadDocument QwCadDocument;
 
+/*! Return the ABI version compiled into the installed vector package. */
 uint32_t qw_cad_abi_version(void);
 
 /* Returns 1 when the bytes look like DXF (ASCII or binary) or DWG. */
@@ -71,12 +72,18 @@ int qw_cad_probe(const void *data, size_t size);
  * with LINE/CIRCLE/ARC/LWPOLYLINE and TEXT entities in this release. */
 QwCadStatus qw_cad_parse(const void *data, size_t size,
                          QwCadDocument **out_document);
+/*! Return the detected CAD format of a parsed document. */
 QwCadFormat qw_cad_format(const QwCadDocument *document);
+/*! Return the number of supported geometric entities. */
 size_t qw_cad_entity_count(const QwCadDocument *document);
+/*! Return the number of distinct layers. */
 size_t qw_cad_layer_count(const QwCadDocument *document);
+/*! Return the model-space bounding box of all entities. */
 QwCadStatus qw_cad_bounds(const QwCadDocument *document, QwCadBounds *out_bounds);
 
+/*! Return the number of text entities. */
 size_t qw_cad_text_count(const QwCadDocument *document);
+/*! Return one text entity by index; strings are borrowed from the document. */
 QwCadStatus qw_cad_text_at(const QwCadDocument *document, size_t index,
                            QwCadTextInfo *out_text);
 
@@ -91,9 +98,13 @@ QwCadStatus qw_cad_render_rgba(const QwCadDocument *document, uint32_t width,
 QwCadStatus qw_cad_render_svg(const QwCadDocument *document, char **out_svg,
                               size_t *out_size);
 
+/*! Release a document returned by qw_cad_parse(); NULL is accepted. */
 void qw_cad_document_free(QwCadDocument *document);
+/*! Release pixels returned by qw_cad_render_rgba(); NULL is accepted. */
 void qw_cad_image_free(QwCadImage *image);
+/*! Release a buffer returned by qw_cad_render_svg(); NULL is accepted. */
 void qw_cad_buffer_free(void *buffer);
+/*! Return a static human-readable name for a status code. */
 const char *qw_cad_status_string(QwCadStatus status);
 
 #ifdef __cplusplus

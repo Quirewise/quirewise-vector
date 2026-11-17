@@ -24,12 +24,15 @@ typedef struct QwSvgzDocument {
     size_t svg_size;
 } QwSvgzDocument;
 
+/*! Return the ABI version compiled into the installed vector package. */
 int qw_svgz_abi_version(void);
 
 /* Decompress one bounded gzip member containing an SVG document. */
 QwSvgzStatus qw_svgz_decode(const void *data, size_t size,
                             QwSvgzDocument *out_document);
+/*! Release a document returned by the parser; NULL is accepted. */
 void qw_svgz_document_free(QwSvgzDocument *document);
+/*! Return a static human-readable name for a status code. */
 const char *qw_svgz_status_string(QwSvgzStatus status);
 
 #ifdef __cplusplus

@@ -32,13 +32,16 @@ typedef struct QwSvgError {
     char message[192];
 } QwSvgError;
 
+/*! Return the ABI version compiled into the installed vector package. */
 int qw_svg_abi_version(void);
 
 /* Render the supported native SVG subset at 2x document units into RGBA8.
  * The input bytes are borrowed. Release output pixels with qw_svg_image_free. */
 QwSvgStatus qw_svg_decode(const void *data, size_t size,
                           QwSvgImage *out_image, QwSvgError *out_error);
+/*! Release a rasterized SVG image; NULL is accepted. */
 void qw_svg_image_free(QwSvgImage *image);
+/*! Return a static human-readable name for a status code. */
 const char *qw_svg_status_string(QwSvgStatus status);
 
 #ifdef __cplusplus
